@@ -303,6 +303,56 @@ class TestModelAdapterHF:
         "sparse_attention_hub.adapters.model_servers.huggingface.AutoModelForCausalLM"
     )
     @patch("sparse_attention_hub.adapters.model_servers.huggingface.AutoTokenizer")
+    def test_custom_attention_forwards_explicit_softcap(
+        self, mock_tokenizer, mock_model
+    ) -> None:
+        """Softcap passed by caller should be forwarded unchanged to sparse attention."""
+        mock_tokenizer_instance = Mock()
+        mock_tokenizer.from_pretrained.return_value = mock_tokenizer_instance
+
+        mock_model_instance = Mock()
+        mock_model.from_pretrained.return_value = mock_model_instance
+
+        adapter = ModelAdapterHF(
+            sparse_attention_config=self.sparse_attention_config,
+            model_name="test-model",
+            model_kwargs={"torch_dtype": torch.float16},
+        )
+
+        custom_fn = adapter.get_custom_attention_function(adapter.sparse_attention)
+
+        queries = torch.randn(1, 1, 2, 4)
+        keys = torch.randn(1, 1, 2, 4)
+        values = torch.randn(1, 1, 2, 4)
+
+        adapter.sparse_attention.custom_attention = Mock(
+            return_value=(torch.zeros_like(queries), None)
+        )
+
+        module = torch.nn.Module()
+
+        custom_fn(
+            module=module,
+            queries=queries,
+            keys=keys,
+            values=values,
+            attention_mask=None,
+            scaling=1.0,
+            dropout=0.0,
+            sparse_meta_data={},
+            softcap=30.0,
+        )
+
+        assert adapter.sparse_attention.custom_attention.call_count == 1
+        assert (
+            adapter.sparse_attention.custom_attention.call_args.kwargs["softcap"]
+            == 30.0
+        )
+
+    @patch(
+        "sparse_attention_hub.adapters.model_servers.huggingface.AutoModelForCausalLM"
+    )
+    @patch("sparse_attention_hub.adapters.model_servers.huggingface.AutoTokenizer")
     def test_generate_unique_attention_name(self, mock_tokenizer, mock_model) -> None:
         """Test unique attention name generation."""
         # Mock the tokenizer and model

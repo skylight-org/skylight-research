@@ -246,7 +246,20 @@ class ModelAdapterHF(ModelAdapter):
                     kwargs["layer_idx"] = layer_idx
 
             kwargs["layer_type"] = infer_layer_type(module, layer_idx, self.model)
+            softcap = None
+            module_config = getattr(module, "config", None)
+            if module_config is not None:
+                for attr_name in ("attn_logit_softcapping", "softcap", "attention_softcap"):
+                    softcap = getattr(module_config, attr_name, None)
+                    if softcap is not None:
+                        break
 
+            if softcap is None:
+                softcap = getattr(module, "softcap", None)
+
+            if softcap is not None:
+                kwargs["softcap"] = softcap
+            
             if "sparse_meta_data" in kwargs:
                 sparse_meta_data: Dict[Any, Any] = kwargs["sparse_meta_data"]
                 kwargs.pop("sparse_meta_data", None)

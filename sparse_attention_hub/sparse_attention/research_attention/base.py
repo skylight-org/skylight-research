@@ -26,7 +26,6 @@ class ResearchAttentionConfig(SparseAttentionConfig):
     """Configuration class for research attention mechanisms."""
 
     masker_configs: List[MaskerConfig]
-    softcap: Optional[float] = None  # Optional softcap for attention scores (e.g., Gemma uses 30.0)
 
 
 class ResearchAttention(SparseAttention):
@@ -87,7 +86,14 @@ class ResearchAttention(SparseAttention):
         Returns:
             Tuple of attention output and optional attention weights.
         """
-        softcap = kwargs.pop("softcap", self.sparse_attention_config.softcap)
+        module_layer_type = getattr(module, "layer_type", None)
+        layer_type: str = str(
+            kwargs.get(
+                "layer_type",
+                module_layer_type if module_layer_type is not None else "unknown",
+            )
+        )
+        softcap = kwargs.pop("softcap", None)
 
         # Extract sparse_meta_data from kwargs
         if "sparse_meta_data" not in kwargs:
@@ -121,7 +127,6 @@ class ResearchAttention(SparseAttention):
                 **kwargs,
             )
 
-        layer_type: str = str(kwargs.get("layer_type", "unknown"))
         assert layer_type in ["full_attention", "sliding_attention", "unknown"]
         if MicroMetricLogger().is_metric_enabled("research_attention_density"):
             # Density is only meaningful for dense/full-attention layers.
