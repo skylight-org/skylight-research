@@ -53,7 +53,7 @@ Instructions:
             'answer_prefix': answer_prefix,
             'answer': str(row['Answer']),  # Convert to string for consistency
             'id': row['ID'],
-            'max_new_tokens': 32000,  # Allow comprehensive step-by-step solutions
+            'max_new_tokens': 65536,  # Allow comprehensive step-by-step solutions
         })
     
     # Convert to Dataset

@@ -9,6 +9,7 @@ Benchmark package for evaluating various language model capabilities.
 from . import (
     AIME2024,
     AIME2025,
+    AIME2026,
     infinite_bench,
     longbench,
     longbenchv2,
@@ -53,6 +54,7 @@ __all__ = [
     "Loogle",
     "AIME2024",
     "AIME2025",
+    "AIME2026",
     "infinite_bench",
     "longbench",
     "longbenchv2",

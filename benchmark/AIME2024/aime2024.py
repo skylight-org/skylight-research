@@ -3,6 +3,7 @@
 from typing import Dict, Any, List
 import pandas as pd
 
+from ..aime_common import MAX_NEW_TOKENS_CAP
 from ..base import Benchmark
 from ..benchmark_registry import register_benchmark
 from .calculate_metrics import calculate_metrics
@@ -48,6 +49,7 @@ class AIME2024(Benchmark):
             dataset = load_dataset(self.huggingface_dataset_id, split="test")
             df = dataset.to_pandas()
             df["task"] = "aime2024"  # Ensure task column exists
+            df["max_new_tokens"] = MAX_NEW_TOKENS_CAP
             print(f"  ✓ Loaded {len(df)} AIME2024 problems")
             return df
         except Exception as e:

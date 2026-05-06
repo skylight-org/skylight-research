@@ -70,6 +70,26 @@ def _project_root() -> Path:
     return Path(__file__).resolve().parent.parent
 
 
+def _default_mini_swebench_config_path() -> str:
+    """Packaged SWE-bench prompts + agent limits (mini-swe-agent v2+)."""
+    try:
+        from minisweagent.config import builtin_config_dir
+
+        candidate = builtin_config_dir / "benchmarks" / "swebench.yaml"
+        if candidate.is_file():
+            return str(candidate)
+    except Exception:
+        pass
+    raise FileNotFoundError(
+        "Could not find minisweagent/config/benchmarks/swebench.yaml. "
+        "Install mini-swe-agent in this environment or pass --config explicitly."
+    )
+
+
+def _default_litellm_registry_path() -> str:
+    return str(_project_root() / "benchmarks" / "mini" / "model_registry.json")
+
+
 def _mini_binary() -> str:
     """Return the mini-extra executable path inside the active conda env."""
     for candidate in ("mini-extra",):
@@ -327,13 +347,19 @@ def main() -> None:
     # Paths
     p.add_argument(
         "--config",
-        default=str(_project_root() / "benchmarks" / "mini" / "swebench_vllm.yaml"),
-        help="Path to mini config YAML (default: benchmarks/mini/swebench_vllm.yaml).",
+        default="",
+        help=(
+            "Path to mini config YAML (default: minisweagent packaged "
+            "benchmarks/swebench.yaml)."
+        ),
     )
     p.add_argument(
         "--registry",
-        default=str(_project_root() / "benchmarks" / "mini" / "model_registry.json"),
-        help="Path to LiteLLM model registry JSON (default: benchmarks/mini/model_registry.json).",
+        default="",
+        help=(
+            "Path to LiteLLM model registry JSON (default: "
+            "benchmarks/mini/model_registry.json, created empty if missing)."
+        ),
     )
 
     # Control
@@ -345,6 +371,15 @@ def main() -> None:
                         "other models that do not support the thinking chat template kwarg.")
 
     args = p.parse_args()
+
+    if not str(args.config).strip():
+        try:
+            args.config = _default_mini_swebench_config_path()
+        except FileNotFoundError as exc:
+            print(f"Error: {exc}")
+            sys.exit(1)
+    if not str(args.registry).strip():
+        args.registry = _default_litellm_registry_path()
 
     if args.num_gpus % args.gpus_per_server != 0:
         print(
@@ -386,6 +421,9 @@ def main() -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     config_path = Path(args.config)
     registry_path = Path(args.registry)
+    registry_path.parent.mkdir(parents=True, exist_ok=True)
+    if not registry_path.exists():
+        registry_path.write_text("{}\n", encoding="utf-8")
     num_replicas = args.num_gpus // args.gpus_per_server
 
     if not args.skip_validation:

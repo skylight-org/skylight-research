@@ -32,7 +32,6 @@ If you want to pin GPUs explicitly:
 from __future__ import annotations
 
 import argparse
-import json
 import os
 import socket
 import subprocess
@@ -40,6 +39,8 @@ import sys
 import tempfile
 import time
 from pathlib import Path
+
+import yaml
 
 
 def _project_root() -> Path:
@@ -166,6 +167,16 @@ def main() -> None:
         action="store_true",
         help="Do not pass --is-hybrid to start_server.py.",
     )
+    parser.add_argument(
+        "--step-limit",
+        type=int,
+        default=None,
+        metavar="N",
+        help=(
+            "Override mini-swe-agent agent.step_limit (packaged swebench.yaml default is 250). "
+            "Lower values cut cost/time but raise risk the agent hits the limit before submitting."
+        ),
+    )
     args = parser.parse_args()
 
     if args.filter_spec and args.slice_spec:
@@ -248,15 +259,36 @@ def main() -> None:
     server_proc: subprocess.Popen[str] | None = None
     try:
         with tempfile.TemporaryDirectory(prefix="mini_swe_hf_sparse_") as tmp_dir:
+            # mini-swe-agent v2: any -c replaces the default; we must merge the
+            # packaged SWE-bench agent templates before the local model overlay.
+            from minisweagent.config import builtin_config_dir
+
+            swebench_agent_config = builtin_config_dir / "benchmarks" / "swebench.yaml"
+            if not swebench_agent_config.is_file():
+                raise SystemExit(
+                    "Could not find minisweagent SWE-bench config at "
+                    f"{swebench_agent_config}. Is mini-swe-agent installed?"
+                )
+
             tmp_path = Path(tmp_dir)
-            cfg_path = tmp_path / "mini_config.json"
+            cfg_path = tmp_path / "mini_config.yaml"
             registry_path = tmp_path / "model_registry.json"
-            cfg_path.write_text(json.dumps(config_data, indent=2), encoding="utf-8")
+            cfg_path.write_text(
+                yaml.safe_dump(
+                    config_data,
+                    sort_keys=False,
+                    default_flow_style=False,
+                ),
+                encoding="utf-8",
+            )
             registry_path.write_text("{}", encoding="utf-8")
 
+            mini_cmd.extend(["-c", str(swebench_agent_config)])
             mini_cmd.extend(["-c", str(cfg_path)])
             mini_cmd.extend(["-c", f"model.model_name={client_model_name}"])
             mini_cmd.extend(["-c", f"model.model_kwargs.api_base={api_base}"])
+            if args.step_limit is not None:
+                mini_cmd.extend(["-c", f"agent.step_limit={args.step_limit}"])
             if args.filter_spec:
                 mini_cmd.extend(["--filter", args.filter_spec])
             if args.slice_spec:
@@ -280,6 +312,8 @@ def main() -> None:
                 print(f"Slice          : {args.slice_spec}")
             if args.visible_gpus.strip():
                 print(f"Visible GPUs   : {args.visible_gpus.strip()}")
+            if args.step_limit is not None:
+                print(f"Step limit     : {args.step_limit}")
             print(f"Output         : {output_dir}")
             print("=" * 72)
 

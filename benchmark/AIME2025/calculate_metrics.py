@@ -3,9 +3,59 @@
 
 
 import re
-import pandas as pd
-from typing import List, Union
 import ast
+from typing import Any, List, Union
+
+import numpy as np
+import pandas as pd
+
+
+def _parse_aime_int(num_str: str) -> Union[int, None]:
+    """Parse integer-like text safely for AIME's 0-999 range.
+
+    Avoids Python int conversion on very long numeric spans that can trigger
+    ``sys.set_int_max_str_digits`` limits.
+    """
+    if not isinstance(num_str, str):
+        return None
+    s = num_str.strip()
+    if not s:
+        return None
+    # Preserve numerical meaning while allowing leading zeros (e.g., "007").
+    normalized = s.lstrip("0") or "0"
+    if len(normalized) > 3:
+        return None
+    try:
+        return int(normalized)
+    except ValueError:
+        return None
+
+
+def _reference_cell_to_str_list(ref: Any) -> List[str]:
+    """Normalize ground-truth ``answer`` cells (str, list, numpy) to a list of strings.
+
+    Parquet / pandas often stores list-valued columns as ``object``-dtype
+    ``numpy.ndarray`` rows; ``ast.literal_eval`` cannot consume those directly.
+    """
+    if isinstance(ref, np.ndarray):
+        ref = ref.tolist()
+
+    if isinstance(ref, (list, tuple)):
+        return [str(x) for x in ref]
+
+    if isinstance(ref, str):
+        s = ref.strip()
+        if s.startswith("["):
+            parsed = ast.literal_eval(s)
+            if isinstance(parsed, (list, tuple)):
+                return [str(x) for x in parsed]
+            return [str(parsed)]
+        return [s]
+
+    if pd.isna(ref):
+        return [""]
+
+    return [str(ref)]
 
 def extract_boxed_answer(text: str) -> str:
     """
@@ -55,7 +105,9 @@ def extract_numerical_answer(text: str) -> str:
         # Extract just the number from the boxed content
         numbers = re.findall(r'\d+', boxed_answer)
         if numbers:
-            return numbers[-1]  # Take the last number found
+            parsed = _parse_aime_int(numbers[-1])
+            if parsed is not None and 0 <= parsed <= 999:
+                return str(parsed)  # Take the last valid number found
     
     # Fallback 1: Look for "answer is X" or "answer: X" patterns
     answer_patterns = [
@@ -68,9 +120,9 @@ def extract_numerical_answer(text: str) -> str:
         matches = re.findall(pattern, text, re.IGNORECASE)
         if matches:
             # Check if the number is in valid AIME range
-            num = int(matches[-1])
-            if 0 <= num <= 999:
-                return matches[-1]
+            num = _parse_aime_int(matches[-1])
+            if num is not None and 0 <= num <= 999:
+                return str(num)
     
     # Fallback 2: Look for numbers at the end of the text
     # This catches cases where the model just states the number
@@ -81,15 +133,15 @@ def extract_numerical_answer(text: str) -> str:
             numbers = re.findall(r'\b\d+\b', line)
             if numbers:
                 # Check if the number is in valid AIME range (0-999)
-                num = int(numbers[-1])
-                if 0 <= num <= 999:
+                num = _parse_aime_int(numbers[-1])
+                if num is not None and 0 <= num <= 999:
                     return str(num)
     
     # Fallback 3: Find any number in valid AIME range
     all_numbers = re.findall(r'\b\d+\b', text)
     for num_str in reversed(all_numbers):  # Check from end to beginning
-        num = int(num_str)
-        if 0 <= num <= 999:
+        num = _parse_aime_int(num_str)
+        if num is not None and 0 <= num <= 999:
             return str(num)
     
     return ""
@@ -131,9 +183,7 @@ def calculate_metrics(df: pd.DataFrame) -> dict:
         Dictionary containing the calculated metrics
     """
     predictions = df["predicted_answer"].tolist()
-    references = df["answer"].tolist()
-    
-    references = [ast.literal_eval(ref) for ref in references]
+    references = [_reference_cell_to_str_list(ref) for ref in df["answer"].tolist()]
     
     # Calculate exact match accuracy
     exact_match = calculate_exact_match_score(predictions, references)
@@ -173,10 +223,7 @@ def analyze_errors(df: pd.DataFrame) -> dict:
         Dictionary with error analysis
     """
     predictions = df["predicted_answer"].tolist()
-    references = df["answer"].tolist()
-    
-    if references and not isinstance(references[0], list):
-        references = [[str(ref)] for ref in references]
+    references = [_reference_cell_to_str_list(ref) for ref in df["answer"].tolist()]
     
     error_types = {
         "no_answer_extracted": 0,

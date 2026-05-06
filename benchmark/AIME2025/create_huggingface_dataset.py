@@ -58,7 +58,7 @@ Instructions:
             'answer_prefix': answer_prefix,
             'answer': answer,
             'task': 'aime2025',
-            'max_new_tokens': 32000,  # Allow comprehensive step-by-step solutions
+            'max_new_tokens': 65536,  # Allow comprehensive step-by-step solutions
             'problem_id': row['id'],
             'year': row['year']
         })

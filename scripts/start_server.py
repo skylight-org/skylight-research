@@ -53,6 +53,9 @@ try:
         OracleTopKConfig,
         SinkMaskerConfig,
     )
+    from sparse_attention_hub.sparse_attention.research_attention.maskers.sampling.implementations import (
+        AdaptiveSamplingMaskerConfig,
+    )
 except ImportError as e:
     print(f"Error: Could not import required modules. {e}")
     print(
@@ -194,12 +197,20 @@ def _dense_prefill_attention_bhld(
 # ==============================================================================
 
 # ``None``: fully dense HuggingFace attention. Default: sink + local window + OracleTopK
-# at 20% heavy mass for research sparse decode.
+# at 2% key fraction per query row + vAttention adaptive sampling (Desai et al. 2025), matching
+# ``research_attention/README.md`` Example 3 (offsets aligned with sink/local = 128).
 SPARSE_CONFIG: Optional[ResearchAttentionConfig] = ResearchAttentionConfig(
     masker_configs=[
         SinkMaskerConfig(sink_size=128),
         LocalMaskerConfig(window_size=128),
-        OracleTopKConfig(heavy_size=0.2, search_space={}),
+        OracleTopKConfig(heavy_size=0.02, search_space={}),
+        AdaptiveSamplingMaskerConfig(
+            base_rate_sampling=0.1,
+            epsilon=0.25,
+            delta=0.25,
+            init_offset=128,
+            local_offset=128,
+        ),
     ],
 )
 # ==============================================================================

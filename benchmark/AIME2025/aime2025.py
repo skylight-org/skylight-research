@@ -3,6 +3,7 @@
 from typing import Dict, Any, List
 import pandas as pd
 
+from ..aime_common import MAX_NEW_TOKENS_CAP
 from ..base import Benchmark
 from ..benchmark_registry import register_benchmark
 from .calculate_metrics import calculate_metrics
@@ -48,6 +49,9 @@ class AIME2025(Benchmark):
             dataset = load_dataset(self.huggingface_dataset_id, split="test")
             df = dataset.to_pandas()
             df["task"] = "aime2025"  # Ensure task column exists
+            # Hub parquet may ship an older per-row cap; align with MAX_NEW_TOKENS_CAP so
+            # ``run_benchmark``'s min(user, row) does not silently cap long generations.
+            df["max_new_tokens"] = MAX_NEW_TOKENS_CAP
             print(f"  ✓ Loaded {len(df)} AIME2025 problems")
             return df
         except Exception as e:

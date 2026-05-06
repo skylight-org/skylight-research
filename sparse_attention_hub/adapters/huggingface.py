@@ -416,7 +416,7 @@ class ModelAdapterHF(ModelAdapter):
         last_outputs: Optional[Any] = None
 
         if self.hybrid:
-            for _ in range(question_tokens.shape[1]):
+            for idx in range(question_tokens.shape[1]):
                 step_input: torch.Tensor = question_tokens[:, idx : idx + 1]
                 model_kwargs: Dict[str, Any] = {
                     "input_ids": step_input,
