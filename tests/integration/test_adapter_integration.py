@@ -3,6 +3,7 @@
 from unittest.mock import Mock, patch
 
 import pytest
+import psutil
 import torch
 
 from sparse_attention_hub.adapters import ModelAdapterHF, Request, RequestResponse
@@ -571,7 +572,10 @@ class TestAdapterManual:
         )
         response = adapter.process_request(request, {}, {})
         assert len(response.responses) == 2
-
+    @pytest.mark.skipif(
+    psutil.virtual_memory().total < 8 * 1024**3,
+    reason="Insufficient memory for large model (Qwen 1.7B)"
+    )
     def test_enable_sparse_mode(self, sparse_attention_config_multi, model_name):
         """Test enable_sparse_mode with real model."""
         from transformers.masking_utils import ALL_MASK_ATTENTION_FUNCTIONS

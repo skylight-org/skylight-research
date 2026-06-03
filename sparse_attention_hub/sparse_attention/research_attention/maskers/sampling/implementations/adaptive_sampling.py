@@ -14,7 +14,15 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, Union
 
 import torch
-from ray import tune
+try:
+    from ray import tune
+except ImportError:
+    class _TuneStub:
+        @staticmethod
+        def grid_search(values):
+            return values
+
+    tune = _TuneStub()
 from scipy.stats import norm
 
 from sparse_attention_hub.sparse_attention.research_attention.maskers.base import (

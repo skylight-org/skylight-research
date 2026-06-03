@@ -4,7 +4,15 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 import torch
-from ray import tune
+try:
+    from ray import tune
+except ImportError:
+    class _TuneStub:
+        @staticmethod
+        def grid_search(values):
+            return values
+
+    tune = _TuneStub()
 
 from sparse_attention_hub.sparse_attention.research_attention.maskers.base import (
     AttentionTensorDimensions,
