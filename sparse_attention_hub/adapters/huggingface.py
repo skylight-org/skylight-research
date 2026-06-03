@@ -217,11 +217,17 @@ class ModelAdapterHF(ModelAdapter):
                 tokenize=False,
                 add_generation_prompt=True,
             )
-        new_context = context.split(self.random_separator)[0]
-        new_questions = [
-            question + context.split(self.random_separator)[1] + answer_prefix
-            for question in questions
-        ]
+            new_context = context.split(self.random_separator)[0]
+            new_questions = [
+                question + context.split(self.random_separator)[1] + answer_prefix
+                for question in questions
+            ]
+        else: 
+            new_context = context.split(self.random_separator)[0]
+            new_questions = [
+                f"{context.split(self.random_separator)[0]}\n\nQuestion: {question}\n{answer_prefix}"
+                for question in questions
+            ]
         return new_context, new_questions
 
     def get_custom_attention_function(
