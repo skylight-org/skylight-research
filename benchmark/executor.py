@@ -245,6 +245,12 @@ def _benchmark_worker(
                         max_records=micro_metric_logger_max_records,
                         sampling_factor=micro_metric_logger_sampling_factor
                     )
+                    result_dir = Path(stub.result_dir)
+
+                    parent_dir = result_dir.parent
+                    if not parent_dir.exists():
+                        raise FileNotFoundError(f"Parent directory does not exist: {parent_dir}")
+
                     metrics = benchmark.run_benchmark(
                         adapter=adapter,
                         result_dir=stub.result_dir,
@@ -266,7 +272,8 @@ def _benchmark_worker(
                     result_queue.put(result)
                     
                     logger.info(f"Worker {worker_id}: Successfully completed {stub.model_name}/{stub.sparse_config_name}/{stub.benchmark_name} in {execution_time:.2f}s")
-
+            except (OSError, PermissionError, FileNotFoundError):
+                raise
             except Exception as e:
                 execution_time = time.time() - start_time  # Calculate execution time even on failure
                 error_category = _categorize_error(e, "benchmark execution")
@@ -295,15 +302,17 @@ def _benchmark_worker(
     except Exception as worker_error:
         logger.error(f"Worker {worker_id}: Critical worker error: {worker_error}")
         logger.debug(f"Worker {worker_id}: Critical error details: {traceback.format_exc()}")
-        
+
         # Cleanup any remaining resources
         _cleanup_worker_resources(gpu_pool, current_gpu_id, adapter, logger, worker_id)
-        
-        # Report worker failure to error queue
+
+        # Report worker failure to error queue including exception class name so main process can re-raise if needed
         error_queue.put({
             "worker_id": worker_id,
             "error_type": "WORKER_CRITICAL_ERROR",
             "error_message": str(worker_error),
+            "exception_class": type(worker_error).__name__,
+            "exception_message": str(worker_error),
             "error_traceback": traceback.format_exc()
         })
 
@@ -718,7 +727,18 @@ class BenchmarkExecutor:
             # Step 5: Final result collection
             self.logger.info("All workers completed, collecting final results...")
             self._collect_available_results(result_queue, error_queue, individual_results, failed_executions)
-            
+            # If a worker reported a critical filesystem error, raise it here
+            exc_map = {
+                "OSError": OSError,
+                "PermissionError": PermissionError,
+                "FileNotFoundError": FileNotFoundError
+            }
+
+            for fe in failed_executions:
+                if isinstance(fe, dict) and fe.get("error_type") == "WORKER_CRITICAL_ERROR":
+                    exc_name = fe.get("exception_class")
+                    if exc_name in exc_map:
+                        raise exc_map[exc_name](fe.get("exception_message", fe.get("error_message", "")))
         except KeyboardInterrupt:
             self.logger.warning("Received interrupt signal, initiating graceful shutdown...")
             self._graceful_shutdown(workers, stub_queue, gpu_pool, result_queue, error_queue)
@@ -782,8 +802,10 @@ class BenchmarkExecutor:
                 if isinstance(error, BenchmarkFailure):
                     failed_executions.append(error)
                 else:
-                    # Handle worker-level errors
-                    self.logger.error(f"Worker error: {error}")
+                    # Worker-level dicts (critical errors) will be appended so caller can decide to raise
+                    # e.g. {'worker_id': ..., 'error_type': 'WORKER_CRITICAL_ERROR', 'exception_class': 'OSError', ...}
+                    failed_executions.append(error)
+                    self.logger.error(f"Worker error (queued): {error}")
             except Empty:
                 break
     
