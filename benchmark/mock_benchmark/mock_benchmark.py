@@ -122,7 +122,7 @@ class MockBenchmark(Benchmark):
 
         # Convert to DataFrame
         df: pd.DataFrame = pd.DataFrame(sample_data)
-
+        
         # Add sample IDs for tracking
         df["sample_id"] = range(1, len(df) + 1)
         

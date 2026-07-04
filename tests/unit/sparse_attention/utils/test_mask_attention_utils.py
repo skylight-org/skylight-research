@@ -15,8 +15,8 @@ import torch
 from sparse_attention_hub.sparse_attention.utils.mask import Mask
 from sparse_attention_hub.sparse_attention.utils.mask_attention_utils import (
     _compute_masked_exp_attention_weights,
-    apply_softcap,
     apply_inv_mask_sum,
+    apply_softcap,
     create_sampling_mask_with_per_head_budget,
     get_attention_denominator,
     get_attention_numerator,

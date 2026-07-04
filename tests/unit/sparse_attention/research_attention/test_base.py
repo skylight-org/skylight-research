@@ -6,9 +6,10 @@
 :summary: Tests for research attention. This file is part of the Sparse Attention Hub project.
 """
 
+from unittest.mock import patch
+
 import pytest
 import torch
-from unittest.mock import patch
 
 
 @pytest.mark.unit
@@ -389,3 +390,96 @@ class TestDensityLayerFiltering:
                 if call.args[0] == "research_attention_density"
             ]
             assert len(density_calls) == 0
+
+    def test_density_logged_for_unknown_layer(self):
+        """Density SHOULD be logged for 'unknown' layers (e.g. Llama, which exposes
+        no per-layer attention-type metadata). Regression guard for PR #76."""
+        from sparse_attention_hub.sparse_attention.research_attention import (
+            ResearchAttention,
+            ResearchAttentionConfig,
+        )
+
+        attention = ResearchAttention.create_from_config(
+            ResearchAttentionConfig(masker_configs=[])
+        )
+
+        queries = torch.randn(1, 1, 2, 4)
+        keys = torch.randn(1, 1, 2, 4)
+        values = torch.randn(1, 1, 2, 4)
+
+        with patch(
+            "sparse_attention_hub.sparse_attention.research_attention.base.get_masked_attention_output"
+        ) as mock_get_masked_attention_output, patch(
+            "sparse_attention_hub.sparse_attention.research_attention.base.MicroMetricLogger.is_metric_enabled"
+        ) as mock_is_metric_enabled, patch(
+            "sparse_attention_hub.sparse_attention.research_attention.base.MicroMetricLogger.log"
+        ) as mock_log:
+            mock_get_masked_attention_output.return_value = (
+                torch.zeros_like(queries),
+                torch.zeros(1, 1, 2, 2),
+            )
+            mock_is_metric_enabled.side_effect = (
+                lambda metric_name: metric_name == "research_attention_density"
+            )
+
+            module = torch.nn.Module()
+            module.training = False
+
+            attention.custom_attention(
+                module=module,
+                queries=queries,
+                keys=keys,
+                values=values,
+                attention_mask=None,
+                scaling=1.0,
+                dropout=0.0,
+                sparse_meta_data={},
+                layer_idx=0,
+                layer_type="unknown",
+            )
+
+            assert any(
+                call.args[0] == "research_attention_density"
+                for call in mock_log.call_args_list
+            )
+
+    def test_unrecognized_layer_type_does_not_crash(self):
+        """An out-of-whitelist layer_type (e.g. 'chunked_attention' on Llama4) must
+        NOT raise. Regression guard for the removed assert in PR #76."""
+        from sparse_attention_hub.sparse_attention.research_attention import (
+            ResearchAttention,
+            ResearchAttentionConfig,
+        )
+
+        attention = ResearchAttention.create_from_config(
+            ResearchAttentionConfig(masker_configs=[])
+        )
+
+        queries = torch.randn(1, 1, 2, 4)
+        keys = torch.randn(1, 1, 2, 4)
+        values = torch.randn(1, 1, 2, 4)
+
+        with patch(
+            "sparse_attention_hub.sparse_attention.research_attention.base.get_masked_attention_output"
+        ) as mock_get_masked_attention_output:
+            mock_get_masked_attention_output.return_value = (
+                torch.zeros_like(queries),
+                torch.zeros(1, 1, 2, 2),
+            )
+
+            module = torch.nn.Module()
+            module.training = False
+
+            # Must not raise (assert on layer_type was removed in PR #76).
+            attention.custom_attention(
+                module=module,
+                queries=queries,
+                keys=keys,
+                values=values,
+                attention_mask=None,
+                scaling=1.0,
+                dropout=0.0,
+                sparse_meta_data={},
+                layer_idx=0,
+                layer_type="chunked_attention",
+            )

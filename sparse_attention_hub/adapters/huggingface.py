@@ -10,12 +10,13 @@ from tqdm import tqdm
 from transformers.masking_utils import ALL_MASK_ATTENTION_FUNCTIONS
 from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
 
+from sparse_attention_hub.adapters.utils.model_utils import infer_layer_type
+
 from ..sparse_attention.base import SparseAttention, SparseAttentionConfig
 from ..sparse_attention.research_attention.base import ResearchAttention
 from .base import ModelAdapter, Request, RequestResponse
 from .model_servers.huggingface import ModelServerHF
 from .utils.config import ModelServerConfig
-from sparse_attention_hub.adapters.utils.model_utils import infer_layer_type
 
 INT_MAX = 2**31 - 1
 
@@ -115,12 +116,13 @@ class ModelAdapterHF(ModelAdapter):
         max_context_length: int = request_kwargs.get("max_context_length", INT_MAX)
         max_new_tokens: int = generation_kwargs.get("max_new_tokens", INT_MAX)
         print(
-            "Processing request with max_context_length: ",
+            " Processing request with max_context_length: ",
             max_context_length,
             " and max_new_tokens: ",
             max_new_tokens,
             flush=True,
-        )        
+        )
+
         questions: List[str] = (
             request.questions
             if isinstance(request.questions, list)
@@ -249,7 +251,11 @@ class ModelAdapterHF(ModelAdapter):
             softcap = None
             module_config = getattr(module, "config", None)
             if module_config is not None:
-                for attr_name in ("attn_logit_softcapping", "softcap", "attention_softcap"):
+                for attr_name in (
+                    "attn_logit_softcapping",
+                    "softcap",
+                    "attention_softcap",
+                ):
                     softcap = getattr(module_config, attr_name, None)
                     if softcap is not None:
                         break
@@ -259,7 +265,7 @@ class ModelAdapterHF(ModelAdapter):
 
             if softcap is not None:
                 kwargs["softcap"] = softcap
-            
+
             if "sparse_meta_data" in kwargs:
                 sparse_meta_data: Dict[Any, Any] = kwargs["sparse_meta_data"]
                 kwargs.pop("sparse_meta_data", None)
@@ -362,6 +368,7 @@ class ModelAdapterHF(ModelAdapter):
             raise RuntimeError(
                 "Cannot enable sparse mode: sparse attention is not available"
             )
+
         # Store original implementations to restore later
         original_implementations: Dict[str, str] = {}
 

@@ -183,8 +183,10 @@ def create_sampling_mask_with_per_head_budget(
 
     return sampling_mask
 
+
 def apply_softcap(scores: torch.Tensor, softcap: float):
     return softcap * torch.tanh(scores / softcap)
+
 
 def _compute_masked_exp_attention_weights(
     queries: torch.Tensor,
@@ -223,7 +225,7 @@ def _compute_masked_exp_attention_weights(
     # Gemma softcap
     if softcap is not None:
         raw_attention_weights = apply_softcap(raw_attention_weights, softcap)
-    
+
     if attention_mask is not None:
         raw_attention_weights = raw_attention_weights + attention_mask[
             :, :, :, : key_states.shape[-2]
@@ -284,7 +286,7 @@ def get_attention_denominator(
     dropout: float,
     sparse_attention_mask: Mask,
     softcap: Optional[float] = None,
-    **kwargs: Dict[str, Any],    
+    **kwargs: Dict[str, Any],
 ) -> torch.Tensor:
     """Get masked attention denominator.
 
@@ -470,12 +472,8 @@ def get_masked_attention_output(
     )
 
     # Use internal helpers with pre-computed weights
-    num: torch.Tensor = _get_attention_numerator(
-        exp_attention_weights, value_states
-    )
-    den: torch.Tensor = _get_attention_denominator(
-        exp_attention_weights
-    )
+    num: torch.Tensor = _get_attention_numerator(exp_attention_weights, value_states)
+    den: torch.Tensor = _get_attention_denominator(exp_attention_weights)
 
     num, den, exp_attention_weights = apply_sink_bias(
         num=num,

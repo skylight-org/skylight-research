@@ -38,7 +38,16 @@ def generate_tokenizer_key(
     kwargs_hash = hash_kwargs(tokenizer_kwargs)
     return f"{tokenizer_name}|{kwargs_hash}"
 
-def infer_layer_type(module, layer_idx, model=None):
+
+def infer_layer_type(
+    module: Any, layer_idx: Optional[int], model: Optional[Any] = None
+) -> str:
+    """Best-effort classification of an attention layer's type.
+
+    Returns the module's explicit ``layer_type`` (or ``config.layer_types[layer_idx]``
+    / a boolean ``is_sliding``) when the model exposes it, otherwise ``"unknown"``.
+    Used only for density-metric attribution.
+    """
     explicit_layer_type = getattr(module, "layer_type", None)
     if isinstance(explicit_layer_type, str):
         return explicit_layer_type

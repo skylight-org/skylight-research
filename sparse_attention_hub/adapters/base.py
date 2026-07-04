@@ -97,7 +97,6 @@ class ModelAdapter(SparseAttentionAdapterInterface, ModelHubAdapterInterface, AB
         self.sparse_attention_config = sparse_attention_config
         self.sparse_attention = None
         self.kwargs = kwargs
-
         self.sparse_attention = (
             SparseAttention.create_from_config(self.sparse_attention_config)
             if self.sparse_attention_config is not None
