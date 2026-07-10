@@ -460,38 +460,35 @@ class Mask:
             torch.arange(batch_size, device=flat_row_wise_idx.device).unsqueeze(1) * n
         )
 
+        sort_order = torch.argsort(flat_row_wise_idx, dim=1, stable=True)
+        sorted_row_wise_idx = torch.gather(flat_row_wise_idx, dim=1, index=sort_order)
+
+        is_last_duplicate = torch.ones(
+            (batch_size, k), dtype=torch.bool, device=flat_row_wise_idx.device
+        )
+        is_last_duplicate[:, :-1] = (
+            sorted_row_wise_idx[:, :-1] != sorted_row_wise_idx[:, 1:]
+        )
+
         if use_padding:
-            # Slow path: Handle -1 padding (causes GPU-CPU sync via boolean indexing)
-            flat_indices_with_offset: torch.Tensor = flat_row_wise_idx + row_offsets
-
-            # Filter out invalid indices (e.g., -1 padding)
-            valid_mask: torch.Tensor = flat_row_wise_idx >= 0
-            valid_flat_indices: torch.Tensor = flat_indices_with_offset[valid_mask]
-            valid_values: torch.Tensor = flat_data[valid_mask]
-
-            valid_counts_per_row: torch.Tensor = valid_mask.sum(dim=1)
-            ptr: torch.Tensor = torch.cat(
-                [
-                    torch.zeros(1, dtype=torch.long, device=flat_row_wise_idx.device),
-                    torch.cumsum(valid_counts_per_row, dim=0),
-                ]
-            )
+            sorted_valid_mask = sorted_row_wise_idx >= 0
         else:
-            # Fast path: No padding handling (zero-sync, assumes all indices are valid)
-            flat_indices_with_offset = flat_row_wise_idx + row_offsets
+            sorted_valid_mask = torch.ones_like(sorted_row_wise_idx, dtype=torch.bool)
 
-            # Flatten directly without filtering
-            valid_flat_indices = flat_indices_with_offset.reshape(-1)
-            valid_values = flat_data.reshape(-1)
+        sorted_keep_mask = sorted_valid_mask & is_last_duplicate
+        keep_mask = torch.zeros_like(sorted_keep_mask, dtype=torch.bool)
+        keep_mask.scatter_(dim=1, index=sort_order, src=sorted_keep_mask)
+        flat_indices_with_offset = flat_row_wise_idx + row_offsets
+        valid_flat_indices = flat_indices_with_offset[keep_mask]
+        valid_values = flat_data[keep_mask]
 
-            # Create uniform ptr array (each row has exactly k elements)
-            ptr = torch.arange(
-                0,
-                batch_size * k + 1,
-                k,
-                dtype=torch.long,
-                device=flat_row_wise_idx.device,
-            )
+        valid_counts_per_row: torch.Tensor = keep_mask.sum(dim=1)
+        ptr: torch.Tensor = torch.cat(
+            [
+                torch.zeros(1, dtype=torch.long, device=flat_row_wise_idx.device),
+                torch.cumsum(valid_counts_per_row, dim=0),
+            ]
+        )
 
         # Create sparse mask
         sparse_mask: Mask = cls.create_mask_from_indices(
