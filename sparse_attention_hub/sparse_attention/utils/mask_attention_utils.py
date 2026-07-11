@@ -17,6 +17,7 @@ def get_true_attention_output(
     attention_mask: Optional[torch.Tensor],
     scaling: float,
     dropout: float,
+    softcap: Optional[float] = None,
     **kwargs: Dict[str, Any],
 ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
     """Get the true (dense) attention output from the module.
@@ -29,6 +30,8 @@ def get_true_attention_output(
         attention_mask: Optional mask tensor to apply to attention weights.
         scaling: Scaling factor for attention logits.
         dropout: Dropout probability for attention weights.
+        softcap: Optional Gemma-style logit soft cap; forces an eager fp32
+            reference path (SDPA cannot apply softcapping).
         **kwargs: Additional keyword arguments (unused).
 
     Returns:
@@ -39,6 +42,26 @@ def get_true_attention_output(
     num_key_value_groups = _get_num_key_value_groups(queries, keys)
     key_states = repeat_kv(keys, num_key_value_groups)
     value_states = repeat_kv(values, num_key_value_groups)
+
+    if softcap is not None:
+        # SDPA cannot apply logit softcapping; use an eager fp32 reference
+        # mirroring _compute_masked_exp_attention_weights' order of ops.
+        q = queries.to(torch.float32)
+        k = key_states.to(torch.float32)
+        attn_weights = torch.matmul(q, k.transpose(2, 3)) * scaling
+        attn_weights = apply_softcap(attn_weights, softcap)
+        if attention_mask is not None:
+            attn_weights = attn_weights + attention_mask[
+                :, :, :, : key_states.shape[-2]
+            ].to(torch.float32)
+        attn_weights = torch.nn.functional.softmax(attn_weights, dim=-1)
+        if dropout > 0.0 and module.training:
+            attn_weights = torch.nn.functional.dropout(
+                attn_weights, p=dropout, training=True
+            )
+        attn_output = torch.matmul(attn_weights, value_states.to(torch.float32))
+        attn_output = attn_output.to(queries.dtype).transpose(1, 2).contiguous()
+        return attn_output, None
 
     sdp_kwargs = dict(
         query=queries,
@@ -184,7 +207,7 @@ def create_sampling_mask_with_per_head_budget(
     return sampling_mask
 
 
-def apply_softcap(scores: torch.Tensor, softcap: float):
+def apply_softcap(scores: torch.Tensor, softcap: float) -> torch.Tensor:
     return softcap * torch.tanh(scores / softcap)
 
 
@@ -376,6 +399,7 @@ def apply_sink_bias(
     attention_mask: Optional[torch.Tensor],
     sinks: Optional[torch.Tensor],
     scaling: float,
+    softcap: Optional[float] = None,
 ) -> Tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
     if sinks is None:
         return num, den, exp_attention_weights
@@ -391,6 +415,10 @@ def apply_sink_bias(
     q = queries.to(torch.float32)
     k = key_states.to(torch.float32)
     logits = torch.matmul(q, k.transpose(2, 3)) * float(scaling)  # [B,H,Q,K]
+    # Match _compute_masked_exp_attention_weights: softcap before mask add, so
+    # old_max is measured in the same (capped) logit scale as the exp weights.
+    if softcap is not None:
+        logits = apply_softcap(logits, softcap)
     if attention_mask is not None:
         logits = logits + attention_mask[:, :, :, : key_states.shape[-2]].to(
             torch.float32
@@ -486,6 +514,7 @@ def get_masked_attention_output(
         attention_mask=attention_mask,
         sinks=sinks,
         scaling=scaling,
+        softcap=softcap,
     )
 
     num = num.to(torch.float32)

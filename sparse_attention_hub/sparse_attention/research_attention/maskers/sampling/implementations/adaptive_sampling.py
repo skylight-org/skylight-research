@@ -11,7 +11,7 @@ The AdaptiveSamplingMasker is useful for:
 """
 
 from dataclasses import dataclass, field
-from typing import Any, Dict, Union
+from typing import Any, Dict, Optional, Union
 
 import torch
 from ray import tune
@@ -25,6 +25,7 @@ from sparse_attention_hub.sparse_attention.utils.mask import Mask
 from sparse_attention_hub.sparse_attention.utils.mask_attention_utils import (
     _get_num_key_value_groups,
     apply_inv_mask_sum,
+    apply_softcap,
     create_sampling_mask_with_per_head_budget,
     repeat_kv,
 )
@@ -186,11 +187,14 @@ class AdaptiveSamplingMasker(SamplingMasker):
         keys: torch.Tensor,
         scaling: float,
         attention_mask: torch.Tensor,
+        softcap: Optional[float] = None,
     ) -> torch.Tensor:
         """Compute exponential attention scores with numerical stability."""
         ngroups = _get_num_key_value_groups(queries, keys)
         keys = repeat_kv(keys, ngroups)
         raw_scores = torch.matmul(queries, keys.transpose(-2, -1)) * scaling
+        if softcap is not None:
+            raw_scores = apply_softcap(raw_scores, softcap)
         if attention_mask is not None:
             raw_scores = raw_scores + attention_mask[:, :, :, : keys.shape[-2]]
         max_scores = torch.max(raw_scores, dim=-1, keepdim=True)[0]
@@ -364,8 +368,12 @@ class AdaptiveSamplingMasker(SamplingMasker):
             )
 
         # Compute attention scores after removing attention_mask
+        softcap_raw: Any = kwargs.get("softcap", None)
+        softcap: Optional[float] = (
+            float(softcap_raw) if isinstance(softcap_raw, (int, float)) else None
+        )
         expwts = self._compute_exp_attention_scores(
-            queries, keys, scaling, attention_mask
+            queries, keys, scaling, attention_mask, softcap
         )
         static_denominator = apply_inv_mask_sum(expwts, previous_mask)
 

@@ -549,3 +549,122 @@ class TestAdaptiveSamplingMasker:
         dense_mask = result.get_dense_mask()
         assert torch.all(torch.isfinite(dense_mask))
         assert not torch.any(torch.isnan(dense_mask))
+
+
+@pytest.mark.unit
+class TestAdaptiveSamplingSoftcap:
+    """Test softcap handling in AdaptiveSamplingMasker."""
+
+    @pytest.fixture
+    def masker(self):
+        """Create an AdaptiveSamplingMasker instance for softcap testing."""
+        config = AdaptiveSamplingMaskerConfig(
+            base_rate_sampling=0.25,
+            epsilon=0.1,
+            delta=0.1,
+            init_offset=0,
+            local_offset=0,
+        )
+        return AdaptiveSamplingMasker(config)
+
+    def test_compute_exp_scores_applies_softcap_exactly(self, masker):
+        """Softcapped exp scores must equal exp(cap*tanh(s/cap) - rowmax)."""
+        torch.manual_seed(0)
+        queries = torch.randn(1, 1, 2, 4)
+        keys = torch.randn(1, 1, 16, 4)
+        scaling = 0.3
+        cap = 2.0
+
+        raw_scores = torch.matmul(queries, keys.transpose(-2, -1)) * scaling
+
+        # softcap set: cap * tanh(s / cap), then row-wise max subtraction
+        capped_scores = cap * torch.tanh(raw_scores / cap)
+        expected_capped = torch.exp(
+            capped_scores - capped_scores.max(dim=-1, keepdim=True)[0]
+        )
+        actual_capped = masker._compute_exp_attention_scores(
+            queries, keys, scaling, None, softcap=cap
+        )
+        torch.testing.assert_close(actual_capped, expected_capped, atol=1e-6, rtol=0)
+
+        # softcap=None: no tanh, plain exp(s - rowmax)
+        expected_uncapped = torch.exp(
+            raw_scores - raw_scores.max(dim=-1, keepdim=True)[0]
+        )
+        actual_uncapped = masker._compute_exp_attention_scores(
+            queries, keys, scaling, None, softcap=None
+        )
+        torch.testing.assert_close(
+            actual_uncapped, expected_uncapped, atol=1e-6, rtol=0
+        )
+
+    def test_softcap_changes_adaptive_budget(self, masker):
+        """Softcap flattens a bimodal score gap, shrinking the adaptive budget.
+
+        Uncapped, the exp scores are {1, e^-8}: high relative std and a small
+        denominator concentrated on half the keys drive the adaptive budget to
+        its maximum. With softcap=0.5 the scores become {1, e^-0.5}: the
+        distribution is much flatter (smaller std, larger denominator), so the
+        budget formula (delta_ppf * std * range / (eps * denom))^2 yields a
+        smaller budget and thus a lower mask density.
+        """
+        batch_size, num_heads, seq_len_queries, seq_len_keys, head_dim = 1, 1, 1, 64, 2
+
+        queries = torch.tensor([[1.0, 0.0]]).view(
+            batch_size, num_heads, seq_len_queries, head_dim
+        )
+        keys = torch.zeros(batch_size, num_heads, seq_len_keys, head_dim)
+        keys[:, :, : seq_len_keys // 2, 0] = 8.0  # bimodal: half at 8.0, half at 0.0
+        values = torch.zeros(batch_size, num_heads, seq_len_keys, head_dim)
+        scaling = 1.0
+        attention_mask = None
+
+        def make_empty_mask():
+            return Mask.create_empty_mask(
+                (batch_size, num_heads, seq_len_queries, seq_len_keys),
+                dtype=torch.float32,
+                device=torch.device("cpu"),
+            )
+
+        torch.manual_seed(0)
+        mask_nocap = masker.add_mask(
+            keys,
+            queries,
+            values,
+            attention_mask,
+            scaling=scaling,
+            dropout=0.0,
+            sparse_meta_data={},
+            previous_mask=make_empty_mask(),
+        )
+
+        torch.manual_seed(0)
+        mask_cap = masker.add_mask(
+            keys,
+            queries,
+            values,
+            attention_mask,
+            scaling=scaling,
+            dropout=0.0,
+            sparse_meta_data={},
+            previous_mask=make_empty_mask(),
+            softcap=0.5,
+        )
+
+        # Flatter capped distribution => smaller sampled budget => lower density.
+        assert mask_nocap.get_density() > mask_cap.get_density()
+
+        # softcap=None must reproduce the no-kwarg result exactly under same seed.
+        torch.manual_seed(0)
+        mask_none = masker.add_mask(
+            keys,
+            queries,
+            values,
+            attention_mask,
+            scaling=scaling,
+            dropout=0.0,
+            sparse_meta_data={},
+            previous_mask=make_empty_mask(),
+            softcap=None,
+        )
+        assert torch.equal(mask_none.get_dense_mask(), mask_nocap.get_dense_mask())

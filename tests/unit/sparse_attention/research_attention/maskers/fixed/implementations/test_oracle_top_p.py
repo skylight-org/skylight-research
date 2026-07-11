@@ -548,3 +548,112 @@ class TestOracleTopPMaskerIntegration:
         result_cpu_dense = result_cpu.get_dense_mask()
         result_gpu_dense = result_gpu.get_dense_mask().cpu()
         assert torch.allclose(result_cpu_dense, result_gpu_dense)
+
+
+@pytest.mark.unit
+class TestOracleTopPSoftcap:
+    """Test softcap handling in OracleTopPMasker."""
+
+    def test_softcap_changes_top_p_selection(self):
+        """Softcap flattens logits and flips the top-p selection deterministically.
+
+        Setup: d=2, B=H=1, Q=1, K=8; queries=[[1, 0]], keys[i]=[logit_i, 0]
+        with logits [10, 5, 0, 0, 0, 0, 0, 0], scaling=1.0, top_p=0.9.
+        (int(0.9 * 8) = 7 < 8, so the full-attention shortcut is not taken.)
+
+        Without softcap: exp scores after row-max subtraction are
+        [1, e^-5, e^-10 x6]; normalized cumulative mass of the top score
+        alone is ~0.993 >= 0.9, so only 1 position is selected.
+
+        With softcap=1.0: capped logits tanh(10)~=1.0, tanh(5)~=0.9999,
+        tanh(0)=0 give exp adjusted scores [1, ~1, e^-1 x6] (total ~4.21);
+        normalized cumsum is [0.238, 0.475, 0.563, 0.650, 0.738, 0.825,
+        0.913, 1.0], which crosses 0.9 only at index 6, so the threshold is
+        e^-1 and all 8 positions are selected.
+        """
+        config = OracleTopPMaskerConfig(top_p=0.9)
+        masker = OracleTopPMasker(config)
+
+        batch_size, num_heads, seq_len_queries, seq_len_keys = 1, 1, 1, 8
+
+        logits = torch.tensor([10.0, 5.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+        queries = torch.tensor([[[[1.0, 0.0]]]])
+        keys = torch.zeros(batch_size, num_heads, seq_len_keys, 2)
+        keys[0, 0, :, 0] = logits
+        values = torch.zeros(batch_size, num_heads, seq_len_keys, 2)
+
+        mask_shape = (batch_size, num_heads, seq_len_queries, seq_len_keys)
+
+        def run(**extra_kwargs):
+            previous_mask = Mask.create_empty_mask(
+                mask_shape, dtype=torch.float32, device=torch.device("cpu")
+            )
+            return masker.add_mask(
+                keys=keys,
+                queries=queries,
+                values=values,
+                attention_mask=None,
+                scaling=1.0,
+                dropout=0.0,
+                sparse_meta_data={},
+                previous_mask=previous_mask,
+                **extra_kwargs,
+            )
+
+        result_no_softcap = run()
+        result_softcap = run(softcap=1.0)
+
+        dense_no_softcap = result_no_softcap.get_dense_mask()
+        dense_softcap = result_softcap.get_dense_mask()
+
+        active_no_softcap = torch.sum(dense_no_softcap != 0).item()
+        active_softcap = torch.sum(dense_softcap != 0).item()
+
+        assert active_no_softcap == 1, (
+            f"Without softcap only the top score should be selected, "
+            f"got {active_no_softcap} active positions"
+        )
+        assert active_softcap == seq_len_keys, (
+            f"With softcap=1.0 all {seq_len_keys} positions should be selected, "
+            f"got {active_softcap} active positions"
+        )
+        assert not torch.equal(dense_no_softcap, dense_softcap)
+
+    def test_compute_exp_scores_applies_softcap_exactly(self):
+        """_compute_exp_attention_scores matches the inline softcap formula."""
+        config = OracleTopPMaskerConfig(top_p=0.8)
+        masker = OracleTopPMasker(config)
+
+        torch.manual_seed(0)
+        queries = torch.randn(1, 1, 2, 4)
+        keys = torch.randn(1, 1, 5, 4)
+        previous_dense_mask = torch.zeros(1, 1, 2, 5)
+        scaling = 0.3
+        cap = 2.0
+
+        raw_scores = torch.matmul(queries, keys.transpose(2, 3)) * scaling
+
+        # With softcap: exp(cap * tanh(s * scaling / cap) - rowmax)
+        scores_softcap = masker._compute_exp_attention_scores(
+            keys,
+            queries,
+            previous_dense_mask,
+            attention_mask=None,
+            scaling=scaling,
+            softcap=cap,
+        )
+        capped = cap * torch.tanh(raw_scores / cap)
+        expected_softcap = torch.exp(capped - capped.max(dim=-1, keepdim=True)[0])
+        assert torch.allclose(scores_softcap, expected_softcap, atol=1e-6)
+
+        # Regression: softcap=None must match the inline formula WITHOUT tanh
+        scores_none = masker._compute_exp_attention_scores(
+            keys,
+            queries,
+            previous_dense_mask,
+            attention_mask=None,
+            scaling=scaling,
+            softcap=None,
+        )
+        expected_none = torch.exp(raw_scores - raw_scores.max(dim=-1, keepdim=True)[0])
+        assert torch.allclose(scores_none, expected_none, atol=1e-6)

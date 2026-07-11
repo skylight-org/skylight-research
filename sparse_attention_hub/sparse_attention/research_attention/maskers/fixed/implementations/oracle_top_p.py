@@ -1,7 +1,7 @@
 """Oracle top-P masker implementation."""
 
 from dataclasses import dataclass, field
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 import torch
 from ray import tune
@@ -16,6 +16,9 @@ from sparse_attention_hub.sparse_attention.utils.kv_utils import (
     repeat_kv,
 )
 from sparse_attention_hub.sparse_attention.utils.mask import Mask
+from sparse_attention_hub.sparse_attention.utils.mask_attention_utils import (
+    apply_softcap,
+)
 
 from ..base import TopPMasker, TopPMaskerConfig
 
@@ -72,8 +75,12 @@ class OracleTopPMasker(TopPMasker):
             )
 
         # Create oracle top-P attention mask
+        softcap_raw: Any = kwargs.get("softcap", None)
+        softcap: Optional[float] = (
+            float(softcap_raw) if isinstance(softcap_raw, (int, float)) else None
+        )
         oracle_mask: Mask = self._create_oracle_top_p_mask(
-            tensor_dims, keys, queries, previous_mask, attention_mask, scaling
+            tensor_dims, keys, queries, previous_mask, attention_mask, scaling, softcap
         )
         return previous_mask.merge_mask(oracle_mask, inplace=False)
 
@@ -89,11 +96,14 @@ class OracleTopPMasker(TopPMasker):
         previous_dense_mask: torch.Tensor,
         attention_mask: torch.Tensor,
         scaling: float,
+        softcap: Optional[float] = None,
     ) -> torch.Tensor:
         """Compute exp(attention scores) between queries and keys."""
         ngroups = _get_num_key_value_groups(queries, keys)
         keys = repeat_kv(keys, ngroups)
         raw_attention_scores = torch.matmul(queries, keys.transpose(2, 3)) * scaling
+        if softcap is not None:
+            raw_attention_scores = apply_softcap(raw_attention_scores, softcap)
         if attention_mask is not None:
             raw_attention_scores = (
                 raw_attention_scores + attention_mask[:, :, :, : keys.shape[-2]]
@@ -142,12 +152,13 @@ class OracleTopPMasker(TopPMasker):
         previous_mask: Mask,
         attention_mask: torch.Tensor,
         scaling: float,
+        softcap: Optional[float] = None,
     ) -> Mask:
         """Create oracle top-P attention mask using vectorized computation."""
         # Get attention scores after masking out already active positions
         previous_dense_mask: torch.Tensor = previous_mask.get_dense_mask()
         scores: torch.Tensor = self._compute_exp_attention_scores(
-            keys, queries, previous_dense_mask, attention_mask, scaling
+            keys, queries, previous_dense_mask, attention_mask, scaling, softcap
         )
 
         # Compute thresholds using vectorized operations

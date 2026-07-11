@@ -1,9 +1,17 @@
 """Unit tests for the adapter implementation."""
 
+from pathlib import Path
+from typing import Any, List, Optional, Tuple
 from unittest.mock import Mock, patch
 
 import pytest
 import torch
+from transformers import (
+    Gemma2Config,
+    Gemma2ForCausalLM,
+    Gemma4ForCausalLM,
+    Gemma4TextConfig,
+)
 
 from sparse_attention_hub.adapters import (
     ModelAdapter,
@@ -509,3 +517,213 @@ class TestModelAdapterHF:
         assert adapter.sparse_attention_config == self.sparse_attention_config
         assert adapter.sparse_attention is not None
         assert adapter._registered_attention_name is None
+
+
+@pytest.mark.unit
+class TestSoftcapEndToEndTinyGemma:
+    """End-to-end dense-vs-sparse-backend logit equivalence on tiny Gemma models.
+
+    With an empty masker list, the research-attention backend must reproduce the
+    dense eager logits exactly (up to fp32 numerical noise). This covers the
+    softcap plumbing end-to-end: Gemma-2 applies attention-logit softcapping
+    (which the sparse backend must honor), while Gemma-4 does not (softcap must
+    stay None all the way down).
+    """
+
+    def setup_method(self) -> None:
+        """Reset the ModelServer singleton so each test loads its own model."""
+        ModelServer._instance = None
+
+    def teardown_method(self) -> None:
+        """Clean up after each test."""
+        ModelServer._instance = None
+
+    @staticmethod
+    def _build_adapter(model_dir: Path) -> ModelAdapterHF:
+        """Build a ModelAdapterHF (empty masker list) around a saved tiny model.
+
+        Only AutoTokenizer is mocked (we never tokenize -- input_ids are fed
+        directly); AutoModelForCausalLM loads the real model from model_dir.
+        """
+        mock_tokenizer_instance = Mock()
+        mock_tokenizer_instance.pad_token = "<PAD>"
+        with patch(
+            "sparse_attention_hub.adapters.model_servers.huggingface.AutoTokenizer"
+        ) as mock_tokenizer:
+            mock_tokenizer.from_pretrained.return_value = mock_tokenizer_instance
+            adapter = ModelAdapterHF(
+                model_name=str(model_dir),
+                sparse_attention_config=ResearchAttentionConfig(masker_configs=[]),
+                model_kwargs={
+                    "torch_dtype": torch.float32,
+                    "attn_implementation": "eager",
+                },
+                device="cpu",
+            )
+        return adapter
+
+    @staticmethod
+    def _dense_and_sparse_logits(
+        adapter: ModelAdapterHF, input_ids: torch.Tensor, **forward_kwargs: Any
+    ) -> Tuple[torch.Tensor, torch.Tensor, List[Optional[float]]]:
+        """Run a dense forward and a sparse-mode forward on the same inputs.
+
+        The sparse run wraps sparse_attention.custom_attention with a spy that
+        records the softcap kwarg seen on every attention call.
+
+        Returns:
+            Tuple of (dense_logits, sparse_logits, recorded_softcaps).
+        """
+        recorded_softcaps: List[Optional[float]] = []
+        original_custom_attention = adapter.sparse_attention.custom_attention
+
+        def spying_custom_attention(*args: Any, **kwargs: Any) -> Any:
+            recorded_softcaps.append(kwargs.get("softcap"))
+            return original_custom_attention(*args, **kwargs)
+
+        adapter.model.eval()
+        with torch.no_grad():
+            dense_logits = adapter.model(input_ids, **forward_kwargs).logits
+            adapter.sparse_attention.custom_attention = spying_custom_attention
+            try:
+                with adapter.enable_sparse_mode():
+                    sparse_logits = adapter.model(
+                        input_ids, sparse_meta_data={}, **forward_kwargs
+                    ).logits
+            finally:
+                adapter.sparse_attention.custom_attention = original_custom_attention
+        return dense_logits, sparse_logits, recorded_softcaps
+
+    def test_tiny_gemma2_softcap_dense_vs_sparse_empty(self, tmp_path: Path) -> None:
+        """Tiny Gemma-2 with an aggressive softcap: sparse backend matches dense.
+
+        attn_logit_softcapping=0.05 forces tanh saturation, so the comparison is
+        genuinely sensitive to softcap handling in the sparse backend.
+        """
+        config = Gemma2Config(
+            vocab_size=256,
+            hidden_size=64,
+            intermediate_size=128,
+            num_hidden_layers=2,
+            num_attention_heads=4,
+            num_key_value_heads=2,
+            head_dim=16,
+            sliding_window=8,
+            attn_logit_softcapping=0.05,
+            query_pre_attn_scalar=1,
+            final_logit_softcapping=None,
+        )
+        model = Gemma2ForCausalLM(config)
+        model_dir = tmp_path / "m"
+        model.save_pretrained(model_dir)
+
+        adapter = self._build_adapter(model_dir)
+        generator = torch.Generator().manual_seed(0)
+        input_ids = torch.randint(0, 256, (1, 24), generator=generator)
+
+        dense_logits, sparse_logits, recorded_softcaps = self._dense_and_sparse_logits(
+            adapter, input_ids
+        )
+
+        # Sensitivity guard: with softcapping disabled the dense logits must
+        # change materially, proving the comparison actually exercises softcap.
+        attention_modules = [layer.self_attn for layer in adapter.model.model.layers]
+        saved_softcaps = [attn.attn_logit_softcapping for attn in attention_modules]
+        for attn in attention_modules:
+            attn.attn_logit_softcapping = None
+        try:
+            with torch.no_grad():
+                dense_logits_nocap = adapter.model(input_ids).logits
+        finally:
+            for attn, softcap in zip(attention_modules, saved_softcaps):
+                attn.attn_logit_softcapping = softcap
+        assert (dense_logits - dense_logits_nocap).abs().max().item() > 1e-3
+
+        # Spy: the sparse backend must have seen softcap=0.05 on every call.
+        assert len(recorded_softcaps) > 0
+        assert all(softcap == 0.05 for softcap in recorded_softcaps)
+
+        assert torch.allclose(dense_logits, sparse_logits, atol=1e-5, rtol=1e-5)
+
+    def test_tiny_gemma4_dense_vs_sparse_empty(self, tmp_path: Path) -> None:
+        """Tiny Gemma-4 (mixed sliding/full layers, no softcap): sparse matches dense."""
+        config = Gemma4TextConfig(
+            vocab_size=256,
+            hidden_size=64,
+            intermediate_size=128,
+            num_hidden_layers=6,
+            num_attention_heads=4,
+            num_key_value_heads=2,
+            head_dim=16,
+            global_head_dim=32,
+            sliding_window=8,
+            num_kv_shared_layers=0,
+            # Keep the per-layer input embedding tiny (defaults are huge).
+            vocab_size_per_layer_input=256,
+            hidden_size_per_layer_input=16,
+        )
+        assert "sliding_attention" in config.layer_types
+        assert "full_attention" in config.layer_types
+
+        model = Gemma4ForCausalLM(config)
+        model_dir = tmp_path / "m"
+        model.save_pretrained(model_dir)
+
+        adapter = self._build_adapter(model_dir)
+        generator = torch.Generator().manual_seed(1)
+        # seq len 24 > sliding_window 8, so sliding layers genuinely mask.
+        input_ids = torch.randint(0, 256, (1, 24), generator=generator)
+
+        dense_logits, sparse_logits, recorded_softcaps = self._dense_and_sparse_logits(
+            adapter, input_ids
+        )
+
+        # Gemma-4 has no attention-logit softcapping: every call must see None.
+        assert len(recorded_softcaps) > 0
+        assert all(softcap is None for softcap in recorded_softcaps)
+
+        assert torch.allclose(dense_logits, sparse_logits, atol=1e-5, rtol=1e-5)
+
+    def test_tiny_gemma4_kv_shared_dense_vs_sparse_empty(self, tmp_path: Path) -> None:
+        """Tiny Gemma-4 with KV-shared layers: sparse matches dense with use_cache."""
+        config = Gemma4TextConfig(
+            vocab_size=256,
+            hidden_size=64,
+            intermediate_size=128,
+            num_hidden_layers=6,
+            num_attention_heads=4,
+            num_key_value_heads=2,
+            head_dim=16,
+            global_head_dim=32,
+            sliding_window=8,
+            layer_types=[
+                "sliding_attention",
+                "sliding_attention",
+                "full_attention",
+                "sliding_attention",
+                "sliding_attention",
+                "full_attention",
+            ],
+            num_kv_shared_layers=2,
+            # Keep the per-layer input embedding tiny (defaults are huge).
+            vocab_size_per_layer_input=256,
+            hidden_size_per_layer_input=16,
+        )
+        model = Gemma4ForCausalLM(config)
+        model_dir = tmp_path / "m"
+        model.save_pretrained(model_dir)
+
+        adapter = self._build_adapter(model_dir)
+        generator = torch.Generator().manual_seed(2)
+        input_ids = torch.randint(0, 256, (1, 24), generator=generator)
+
+        # KV-shared layers reuse cached keys/values, so run with use_cache=True
+        # in BOTH paths.
+        dense_logits, sparse_logits, recorded_softcaps = self._dense_and_sparse_logits(
+            adapter, input_ids, use_cache=True
+        )
+
+        assert len(recorded_softcaps) > 0
+        assert all(softcap is None for softcap in recorded_softcaps)
+
+        assert torch.allclose(dense_logits, sparse_logits, atol=1e-5, rtol=1e-5)

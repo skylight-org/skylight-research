@@ -282,6 +282,115 @@ class TestSoftcapPlumbing:
             assert mock_get_masked_attention_output.call_count == 1
             assert mock_get_masked_attention_output.call_args.kwargs["softcap"] == 45.0
 
+    def test_softcap_visible_to_maskers(self):
+        """Maskers must receive softcap in their add_mask kwargs (real pipeline,
+        no patching), and the full call must still succeed without a
+        duplicate-kwarg TypeError."""
+        from sparse_attention_hub.sparse_attention import SparseAttentionConfig
+        from sparse_attention_hub.sparse_attention.research_attention import (
+            ResearchAttention,
+        )
+        from sparse_attention_hub.sparse_attention.research_attention.maskers.fixed import (
+            LocalMasker,
+            LocalMaskerConfig,
+        )
+
+        masker = LocalMasker.create_from_config(LocalMaskerConfig(window_size=2))
+
+        recorded_kwargs = {}
+        original_add_mask = masker.add_mask
+
+        def recording_add_mask(*args, **kwargs):
+            recorded_kwargs.update(kwargs)
+            return original_add_mask(*args, **kwargs)
+
+        masker.add_mask = recording_add_mask
+
+        attention = ResearchAttention(SparseAttentionConfig(), [masker])
+
+        torch.manual_seed(0)
+        queries = torch.randn(1, 1, 4, 8)
+        keys = torch.randn(1, 1, 4, 8)
+        values = torch.randn(1, 1, 4, 8)
+
+        module = torch.nn.Module()
+        module.training = False
+
+        output, _ = attention.custom_attention(
+            module=module,
+            queries=queries,
+            keys=keys,
+            values=values,
+            attention_mask=None,
+            scaling=0.125,
+            dropout=0.0,
+            sparse_meta_data={},
+            layer_idx=0,
+            softcap=30.0,
+        )
+
+        assert "softcap" in recorded_kwargs
+        assert recorded_kwargs["softcap"] == 30.0
+        assert output.shape == (1, 4, 1, 8)
+        assert torch.isfinite(output).all()
+
+    def test_softcap_forwarded_to_true_attention_for_error_metric(self):
+        """Error-metric branch must forward softcap to get_true_attention_output."""
+        from sparse_attention_hub.sparse_attention.research_attention import (
+            ResearchAttention,
+            ResearchAttentionConfig,
+        )
+
+        attention = ResearchAttention.create_from_config(
+            ResearchAttentionConfig(masker_configs=[])
+        )
+
+        queries = torch.randn(1, 1, 4, 8)
+        keys = torch.randn(1, 1, 4, 8)
+        values = torch.randn(1, 1, 4, 8)
+
+        with patch(
+            "sparse_attention_hub.sparse_attention.research_attention.base.get_masked_attention_output"
+        ) as mock_get_masked_attention_output, patch(
+            "sparse_attention_hub.sparse_attention.research_attention.base.get_true_attention_output"
+        ) as mock_get_true_attention_output, patch(
+            "sparse_attention_hub.sparse_attention.research_attention.base.MicroMetricLogger.is_metric_enabled"
+        ) as mock_is_metric_enabled, patch(
+            "sparse_attention_hub.sparse_attention.research_attention.base.MicroMetricLogger.log"
+        ):
+            mock_get_masked_attention_output.return_value = (
+                torch.zeros(1, 4, 1, 8),
+                torch.zeros(1, 1, 4, 4),
+            )
+            mock_get_true_attention_output.return_value = (
+                torch.ones(1, 4, 1, 8),
+                None,
+            )
+            mock_is_metric_enabled.side_effect = (
+                lambda metric_name: metric_name == "research_attention_output_error"
+            )
+
+            module = torch.nn.Module()
+            module.training = False
+
+            attention.custom_attention(
+                module=module,
+                queries=queries,
+                keys=keys,
+                values=values,
+                attention_mask=None,
+                scaling=0.125,
+                dropout=0.0,
+                sparse_meta_data={},
+                layer_idx=0,
+                softcap=30.0,
+            )
+
+            assert mock_get_true_attention_output.call_count == 1
+            assert mock_get_true_attention_output.call_args.kwargs["softcap"] == 30.0
+            assert mock_get_masked_attention_output.call_count == 1
+            assert mock_get_masked_attention_output.call_args.kwargs["softcap"] == 30.0
+
 
 @pytest.mark.unit
 class TestDensityLayerFiltering:

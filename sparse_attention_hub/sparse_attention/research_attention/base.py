@@ -93,7 +93,13 @@ class ResearchAttention(SparseAttention):
                 module_layer_type if module_layer_type is not None else "unknown",
             )
         )
-        softcap = kwargs.pop("softcap", None)
+        # Keep softcap in kwargs so maskers see it too (e.g. top-p / adaptive
+        # sampling score positions on softcapped logits); popped before the
+        # explicit softcap= calls below.
+        softcap_raw: Any = kwargs.get("softcap", None)
+        softcap: Optional[float] = (
+            float(softcap_raw) if isinstance(softcap_raw, (int, float)) else None
+        )
 
         # Extract sparse_meta_data from kwargs
         if "sparse_meta_data" not in kwargs:
@@ -145,6 +151,9 @@ class ResearchAttention(SparseAttention):
         s_aux: Optional[torch.Tensor] = (
             s_aux_raw if isinstance(s_aux_raw, torch.Tensor) else None
         )
+        # softcap is passed explicitly below; drop it from kwargs to avoid
+        # passing it twice.
+        kwargs.pop("softcap", None)
         # Call compute_masked_attention_output on the result of the last mask
         # Always request attention weights to match the expected return signature
         attention_output: torch.Tensor
@@ -173,6 +182,7 @@ class ResearchAttention(SparseAttention):
                 attention_mask,
                 scaling,
                 dropout,
+                softcap=softcap,
                 **kwargs,
             )
             error = torch.norm(true_attention_output - attention_output) / torch.norm(

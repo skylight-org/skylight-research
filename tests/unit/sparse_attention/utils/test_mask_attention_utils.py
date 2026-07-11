@@ -21,6 +21,7 @@ from sparse_attention_hub.sparse_attention.utils.mask_attention_utils import (
     get_attention_denominator,
     get_attention_numerator,
     get_masked_attention_output,
+    get_true_attention_output,
 )
 
 
@@ -610,6 +611,195 @@ class TestMaskExpWts:
         result = apply_softcap(scores, cap)
 
         assert result.item() <= cap
+
+
+@pytest.mark.unit
+class TestSoftcapNumericalCorrectness:
+    """Numerical correctness of softcap plumbing in attention output helpers."""
+
+    @staticmethod
+    def _make_gqa_inputs():
+        """Seeded GQA inputs (2 query heads per kv head) with large logits.
+
+        Queries are scaled by 10 so raw logits reach ~+/-23, far beyond the
+        softcap of 5.0 used in the tests, ensuring tanh saturation matters.
+        """
+        torch.manual_seed(0)
+        queries = 10 * torch.randn(1, 2, 3, 4)  # (B=1, H=2, Q=3, D=4)
+        keys = torch.randn(1, 1, 5, 4)  # (B=1, H_kv=1, K=5, D=4)
+        values = torch.randn(1, 1, 5, 4)
+
+        # Additive float mask: -inf where key_idx > query_idx + 2 (causal-ish).
+        attention_mask = torch.zeros(1, 2, 3, 5)
+        for q_idx in range(3):
+            for k_idx in range(5):
+                if k_idx > q_idx + 2:
+                    attention_mask[:, :, q_idx, k_idx] = float("-inf")
+
+        return queries, keys, values, attention_mask
+
+    def test_true_attention_output_softcap_matches_manual_eager(self):
+        """Softcapped true attention must match a manual eager fp32 reference."""
+        queries, keys, values, attention_mask = self._make_gqa_inputs()
+        softcap = 5.0
+        scaling = 0.5
+
+        module = torch.nn.Module()
+        module.eval()
+
+        # Manual reference mirroring repeat_kv semantics via repeat_interleave.
+        k_rep = keys.repeat_interleave(2, dim=1)
+        v_rep = values.repeat_interleave(2, dim=1)
+        logits = torch.matmul(queries.float(), k_rep.float().transpose(2, 3)) * scaling
+        capped = softcap * torch.tanh(logits / softcap)
+        capped = capped + attention_mask
+        probs = torch.softmax(capped, dim=-1)
+        expected = torch.matmul(probs, v_rep.float()).to(queries.dtype).transpose(1, 2)
+
+        output, weights = get_true_attention_output(
+            module,
+            queries,
+            keys,
+            values,
+            attention_mask,
+            scaling,
+            0.0,
+            softcap=softcap,
+        )
+
+        assert weights is None
+        assert output.shape == expected.shape
+        assert torch.allclose(output, expected, atol=1e-6)
+
+    def test_true_attention_output_none_softcap_unchanged(self):
+        """softcap=None must keep the original SDPA code path output."""
+        queries, keys, values, attention_mask = self._make_gqa_inputs()
+        scaling = 0.5
+
+        module = torch.nn.Module()
+        module.eval()
+
+        k_rep = keys.repeat_interleave(2, dim=1)
+        v_rep = values.repeat_interleave(2, dim=1)
+        expected = (
+            torch.nn.functional.scaled_dot_product_attention(
+                queries,
+                k_rep,
+                v_rep,
+                attn_mask=attention_mask[..., :5],
+                scale=scaling,
+            )
+            .transpose(1, 2)
+            .contiguous()
+        )
+
+        output, weights = get_true_attention_output(
+            module,
+            queries,
+            keys,
+            values,
+            attention_mask,
+            scaling,
+            0.0,
+            softcap=None,
+        )
+
+        assert weights is None
+        assert torch.allclose(output, expected, atol=1e-6)
+
+    def test_true_attention_output_huge_softcap_approaches_none(self):
+        """A huge softcap leaves logits ~unchanged, matching the SDPA path."""
+        queries, keys, values, attention_mask = self._make_gqa_inputs()
+        scaling = 0.5
+
+        module = torch.nn.Module()
+        module.eval()
+
+        output_none, _ = get_true_attention_output(
+            module,
+            queries,
+            keys,
+            values,
+            attention_mask,
+            scaling,
+            0.0,
+            softcap=None,
+        )
+        output_huge, _ = get_true_attention_output(
+            module,
+            queries,
+            keys,
+            values,
+            attention_mask,
+            scaling,
+            0.0,
+            softcap=1e6,
+        )
+
+        assert torch.allclose(output_huge, output_none, atol=1e-4)
+
+    def test_masked_output_with_sinks_and_softcap_matches_reference(self):
+        """Sinks + softcap: sink rescaling must measure old_max on CAPPED logits.
+
+        Uncapped logits reach ~28 while softcap=10, so a pre-fix apply_sink_bias
+        that recomputes old_max without softcapping rescales num/den by a wildly
+        wrong factor and this test fails.
+        """
+        torch.manual_seed(0)
+        batch_size, num_heads, seq_len_q, seq_len_k, d_model = 1, 2, 2, 6, 4
+        queries = 6 * torch.randn(batch_size, num_heads, seq_len_q, d_model)
+        keys = 5 * torch.randn(batch_size, num_heads, seq_len_k, d_model)
+        values = torch.randn(batch_size, num_heads, seq_len_k, d_model)
+        softcap = 10.0
+        scaling = 0.25
+        sinks = torch.tensor([0.0, 1.0])
+
+        # Sanity: uncapped max logit must far exceed the softcap so an uncapped
+        # old_max in the sink rescaling would be numerically very different.
+        raw_logits = (
+            torch.matmul(queries.float(), keys.float().transpose(2, 3)) * scaling
+        )
+        assert raw_logits.max().item() > 2 * softcap
+
+        empty_mask = Mask.create_empty_mask(
+            (batch_size, num_heads, seq_len_q, seq_len_k),
+            dtype=torch.float32,
+            device=torch.device("cpu"),
+        )
+
+        output, weights = get_masked_attention_output(
+            module=None,
+            queries=queries,
+            keys=keys,
+            values=values,
+            attention_mask=None,
+            sinks=sinks,
+            scaling=scaling,
+            dropout=0.0,
+            sparse_attention_mask=empty_mask,
+            softcap=softcap,
+            return_attention_weights=True,
+        )
+
+        # Reference: softmax over [capped key logits, sink logit]; the sink
+        # column absorbs probability mass but contributes no value vector.
+        capped = softcap * torch.tanh(raw_logits / softcap)
+        sink_col = sinks.view(1, num_heads, 1, 1).expand(
+            batch_size, num_heads, seq_len_q, 1
+        )
+        full_logits = torch.cat([capped, sink_col], dim=-1)
+        probs = torch.softmax(full_logits, dim=-1)
+        expected_output = (
+            torch.matmul(probs[..., :seq_len_k], values.float())
+            .to(queries.dtype)
+            .transpose(1, 2)
+        )
+        expected_weights = probs[..., :seq_len_k].to(queries.dtype)
+
+        assert output.shape == expected_output.shape
+        assert torch.allclose(output, expected_output, atol=1e-6)
+        assert weights.shape == expected_weights.shape
+        assert torch.allclose(weights, expected_weights, atol=1e-6)
 
 
 @pytest.mark.unit
