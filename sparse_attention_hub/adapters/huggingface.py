@@ -160,7 +160,13 @@ class ModelAdapterHF(ModelAdapter):
             for question in questions:
                 sparse_meta_data: Dict[str, Any] = {}
 
+                # Sync sparse_meta_data for NemotronH which cannot thread it
+                # through NemotronHBlock's fixed forward signature
+                if self._is_nemotron_h_model():
+                    self._current_sparse_meta_data = sparse_meta_data
+
                 question_tokens = self.tokenizer.encode(question, return_tensors="pt")
+
                 if input_device is not None:
                     question_tokens = question_tokens.to(input_device)
 
@@ -497,7 +503,8 @@ class ModelAdapterHF(ModelAdapter):
 
     def _is_nemotron_h_model(self) -> bool:
         """Check if the loaded model is a NemotronH model."""
-        return self.model.__class__.__name__ == "NemotronHForCausalLM"
+        model_type = getattr(self.model.config, "model_type", "")
+        return model_type == "nemotron_h"
 
     def _enable_nemotron_h_sparse_mode(self) -> None:
         """Patch NemotronH attention layers to use sparse attention.
@@ -509,6 +516,18 @@ class ModelAdapterHF(ModelAdapter):
             raise RuntimeError("sparse_attention is not initialized")
 
         self._nemotron_h_original_forwards = {}
+        self._current_sparse_meta_data: Dict[str, Any] = {}
+        self_ref = self  # closure reference
+
+        def _repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
+            """Local repeat_kv — avoids fragile transformers import for custom models."""
+            if n_rep == 1:
+                return hidden_states
+            batch, num_kv_heads, slen, head_dim = hidden_states.shape
+            hidden_states = hidden_states[:, :, None, :, :].expand(
+                batch, num_kv_heads, n_rep, slen, head_dim
+            )
+            return hidden_states.reshape(batch, num_kv_heads * n_rep, slen, head_dim)
 
         for name, module in self.model.named_modules():
             block_type = getattr(module, "block_type", None)
@@ -554,13 +573,24 @@ class ModelAdapterHF(ModelAdapter):
                             key_states, value_states, attn_module.layer_idx
                         )
 
-                    from transformers.models.nemotron_h.modeling_nemotron_h import repeat_kv
-                    key_states = repeat_kv(key_states, attn_module.num_key_value_groups)
-                    value_states = repeat_kv(value_states, attn_module.num_key_value_groups)
+                    key_states = _repeat_kv(key_states, attn_module.num_key_value_groups)
+                    value_states = _repeat_kv(value_states, attn_module.num_key_value_groups)
 
                     causal_mask = attention_mask
                     if attention_mask is not None:
                         causal_mask = attention_mask[:, :, :, : key_states.shape[-2]]
+
+                    # Match original NemotronHAttention contiguous requirement
+                    if query_states.device.type == "cuda" and attention_mask is not None:
+                        query_states = query_states.contiguous()
+                        key_states = key_states.contiguous()
+                        value_states = value_states.contiguous()
+
+                    # sparse_meta_data not threaded through NemotronHBlock
+                    # so read it from adapter instance via closure
+                    effective_sparse_meta_data = getattr(
+                        self_ref, '_current_sparse_meta_data', {}
+                    )
 
                     attn_output = NemotronHSparseAttention.sparse_forward(
                         original_module=attn_module,
@@ -569,7 +599,7 @@ class ModelAdapterHF(ModelAdapter):
                         value_states=value_states,
                         attention_mask=causal_mask,
                         research_attention=research_attn,
-                        sparse_meta_data=sparse_meta_data or {},
+                        sparse_meta_data=effective_sparse_meta_data,
                     )
 
                     attn_output = attn_output.transpose(1, 2).contiguous()
