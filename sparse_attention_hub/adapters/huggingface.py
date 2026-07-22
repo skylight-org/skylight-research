@@ -4,6 +4,7 @@ import random
 import string
 from contextlib import contextmanager
 from typing import Any, Callable, Dict, Generator, List, Optional, Tuple
+from .nemotron_h.attention import NemotronHSparseAttention
 
 import torch
 from tqdm import tqdm
@@ -159,7 +160,13 @@ class ModelAdapterHF(ModelAdapter):
             for question in questions:
                 sparse_meta_data: Dict[str, Any] = {}
 
+                # Sync sparse_meta_data for NemotronH which cannot thread it
+                # through NemotronHBlock's fixed forward signature
+                if self._is_nemotron_h_model():
+                    self._current_sparse_meta_data = sparse_meta_data
+
                 question_tokens = self.tokenizer.encode(question, return_tensors="pt")
+
                 if input_device is not None:
                     question_tokens = question_tokens.to(input_device)
 
@@ -369,20 +376,31 @@ class ModelAdapterHF(ModelAdapter):
         custom_attention_name: str = self._ensure_attention_registered()
 
         try:
-            # Switch to sparse attention
-            for name, module in self.model.named_modules():
-                if hasattr(module, "config") and hasattr(
-                    module.config, "_attn_implementation"
-                ):
-                    module.config._attn_implementation = custom_attention_name
+            # Check if this is a NemotronH model
+            is_nemotron_h = self._is_nemotron_h_model()
+
+            if is_nemotron_h:
+                # NemotronH uses its own attention registry, not ALL_ATTENTION_FUNCTIONS
+                # so we patch the forward method of each attention layer directly
+                self._enable_nemotron_h_sparse_mode()
+            else:
+                # Standard HuggingFace models: switch _attn_implementation
+                for name, module in self.model.named_modules():
+                    if hasattr(module, "config") and hasattr(
+                        module.config, "_attn_implementation"
+                    ):
+                        module.config._attn_implementation = custom_attention_name
 
             yield
 
-        finally:
-            # Restore original implementations
-            for name, module in self.model.named_modules():
-                if name in original_implementations:
-                    module.config._attn_implementation = original_implementations[name]
+        finally:    
+            if is_nemotron_h:
+                self._disable_nemotron_h_sparse_mode()
+            else:
+                # Restore original implementations
+                for name, module in self.model.named_modules():
+                    if name in original_implementations:
+                        module.config._attn_implementation = original_implementations[name]
 
     def _generate_response(
         self,
@@ -482,3 +500,125 @@ class ModelAdapterHF(ModelAdapter):
         )
 
         return answer
+
+    def _is_nemotron_h_model(self) -> bool:
+        """Check if the loaded model is a NemotronH model."""
+        model_type = getattr(self.model.config, "model_type", "")
+        return model_type == "nemotron_h"
+
+    def _enable_nemotron_h_sparse_mode(self) -> None:
+        """Patch NemotronH attention layers to use sparse attention.
+        
+        NemotronH has three layer types: mamba, mlp, attention.
+        We only patch block_type == 'attention' layers.
+        """
+        if self.sparse_attention is None:
+            raise RuntimeError("sparse_attention is not initialized")
+
+        self._nemotron_h_original_forwards = {}
+        self._current_sparse_meta_data: Dict[str, Any] = {}
+        self_ref = self  # closure reference
+
+        def _repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
+            """Local repeat_kv — avoids fragile transformers import for custom models."""
+            if n_rep == 1:
+                return hidden_states
+            batch, num_kv_heads, slen, head_dim = hidden_states.shape
+            hidden_states = hidden_states[:, :, None, :, :].expand(
+                batch, num_kv_heads, n_rep, slen, head_dim
+            )
+            return hidden_states.reshape(batch, num_kv_heads * n_rep, slen, head_dim)
+
+        for name, module in self.model.named_modules():
+            block_type = getattr(module, "block_type", None)
+            if block_type != "attention":
+                continue
+
+            mixer = getattr(module, "mixer", None)
+            if mixer is None:
+                continue
+
+            self._nemotron_h_original_forwards[name] = mixer.forward
+
+            def make_patched_forward(attn_module, research_attn):
+                def patched_forward(
+                    hidden_states,
+                    attention_mask=None,
+                    position_ids=None,
+                    past_key_value=None,
+                    output_attentions=False,
+                    use_cache=False,
+                    cache_position=None,
+                    sparse_meta_data=None,
+                    **kwargs,
+                ):
+                    bsz, q_len, _ = hidden_states.size()
+
+                    query_states = attn_module.q_proj(hidden_states)
+                    key_states = attn_module.k_proj(hidden_states)
+                    value_states = attn_module.v_proj(hidden_states)
+
+                    query_states = query_states.view(
+                        bsz, q_len, attn_module.num_heads, attn_module.head_dim
+                    ).transpose(1, 2)
+                    key_states = key_states.view(
+                        bsz, q_len, attn_module.num_key_value_heads, attn_module.head_dim
+                    ).transpose(1, 2)
+                    value_states = value_states.view(
+                        bsz, q_len, attn_module.num_key_value_heads, attn_module.head_dim
+                    ).transpose(1, 2)
+
+                    if past_key_value is not None:
+                        key_states, value_states = past_key_value.update(
+                            key_states, value_states, attn_module.layer_idx
+                        )
+
+                    key_states = _repeat_kv(key_states, attn_module.num_key_value_groups)
+                    value_states = _repeat_kv(value_states, attn_module.num_key_value_groups)
+
+                    causal_mask = attention_mask
+                    if attention_mask is not None:
+                        causal_mask = attention_mask[:, :, :, : key_states.shape[-2]]
+
+                    # Match original NemotronHAttention contiguous requirement
+                    if query_states.device.type == "cuda" and attention_mask is not None:
+                        query_states = query_states.contiguous()
+                        key_states = key_states.contiguous()
+                        value_states = value_states.contiguous()
+
+                    # sparse_meta_data not threaded through NemotronHBlock
+                    # so read it from adapter instance via closure
+                    effective_sparse_meta_data = getattr(
+                        self_ref, '_current_sparse_meta_data', {}
+                    )
+
+                    attn_output = NemotronHSparseAttention.sparse_forward(
+                        original_module=attn_module,
+                        query_states=query_states,
+                        key_states=key_states,
+                        value_states=value_states,
+                        attention_mask=causal_mask,
+                        research_attention=research_attn,
+                        sparse_meta_data=effective_sparse_meta_data,
+                    )
+
+                    attn_output = attn_output.transpose(1, 2).contiguous()
+                    attn_output = attn_output.view(
+                        bsz, q_len, attn_module.num_heads * attn_module.head_dim
+                    )
+                    attn_output = attn_module.o_proj(attn_output)
+
+                    return attn_output, None, past_key_value
+
+                return patched_forward
+
+            mixer.forward = make_patched_forward(mixer, self.sparse_attention)
+
+    def _disable_nemotron_h_sparse_mode(self) -> None:
+        """Restore original NemotronH attention forwards."""
+        for name, module in self.model.named_modules():
+            if name in getattr(self, "_nemotron_h_original_forwards", {}):
+                mixer = getattr(module, "mixer", None)
+                if mixer is not None:
+                    mixer.forward = self._nemotron_h_original_forwards[name]
+        self._nemotron_h_original_forwards = {}
