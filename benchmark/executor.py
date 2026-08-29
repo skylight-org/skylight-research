@@ -226,7 +226,8 @@ def _benchmark_worker(
                         model_name=stub.model_name,
                         sparse_attention_config=stub.sparse_attention_config,
                         model_kwargs=stub.adapter_config.model_kwargs,
-                        tokenizer_kwargs=stub.adapter_config.tokenizer_kwargs
+                        tokenizer_kwargs=stub.adapter_config.tokenizer_kwargs,
+                        revision=stub.adapter_config.revision
                     )
                     
                     # Create benchmark instance
