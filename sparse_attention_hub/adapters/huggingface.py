@@ -32,6 +32,7 @@ class ModelAdapterHF(ModelAdapter):
         tokenizer_kwargs: Optional[Dict[str, Any]] = None,
         device: Optional[str] = None,
         hybrid: Optional[bool] = None,
+        revision: Optional[str] = None,
         **kwargs: Any,
     ) -> None:
         """Initialize HuggingFace adapter.
@@ -42,12 +43,23 @@ class ModelAdapterHF(ModelAdapter):
             model_kwargs: Additional keyword arguments for model creation
             device: Device to run the model on TODO: support dynamic and multipledevice placement
             tokenizer_kwargs: Additional keyword arguments for tokenizer creation
+            revision: Optional HuggingFace revision (branch, tag or commit sha) to pin both
+                the model weights and the tokenizer to, e.g. ``"stage1-step10000"``. It is
+                merged into ``model_kwargs``/``tokenizer_kwargs``, which makes it part of the
+                ModelServer cache key so that two revisions of the same model name do not
+                collide on a single cached instance. An explicit ``revision`` already present
+                in either dict takes precedence.
         """
         super().__init__(model_name, sparse_attention_config, **kwargs)
         self._registered_attention_name: Optional[str] = None
         self._custom_attention_fn: Optional[Callable] = None
-        self.model_kwargs: Dict[str, Any] = model_kwargs or {}
-        self.tokenizer_kwargs: Dict[str, Any] = tokenizer_kwargs or {}
+        self.model_kwargs: Dict[str, Any] = dict(model_kwargs or {})
+        self.tokenizer_kwargs: Dict[str, Any] = dict(tokenizer_kwargs or {})
+
+        self.revision: Optional[str] = revision
+        if revision is not None:
+            self.model_kwargs.setdefault("revision", revision)
+            self.tokenizer_kwargs.setdefault("revision", revision)
 
         raw_registry_path: Any = kwargs.get("model_registry_path", "")
         self.model_registry_path: str = (
