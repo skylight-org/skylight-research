@@ -3,8 +3,7 @@
 Uses the exact same product quantization as PQCache, but the PQ scores drive a
 multinomial sample instead of a top-k, and the mask stores each selected key's
 inclusion probability. Because get_masked_attention_output divides by the mask
-value, the result is a weighted numerator / weighted denominator (Horvitz-
-Thompson) estimate of dense attention as in vAttention, instead of a truncation
+value, the result is a weighted num/weighted denom estimate of dense attention as in vAttention, instead of a truncation
 of it.
 
 Kept as a fixed masker rather than a SamplingMasker so that it can be stacked
