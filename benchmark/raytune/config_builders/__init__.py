@@ -16,6 +16,7 @@ from .magicpig import MagicPigConfigBuilder  # noqa: E402, F401
 from .pqcache import PQCacheTopKConfigBuilder  # noqa: E402, F401
 from .quest_top_k import QuestTopKConfigBuilder  # noqa: E402, F401
 from .random_sampling import RandomSamplingConfigBuilder  # noqa: E402, F401
+from .scann_topk import ScaNNTopKConfigBuilder  # noqa: E402, F401
 from .socket_topk import SocketTopKConfigBuilder  # noqa: E402, F401
 
 __all__ = [
@@ -32,6 +33,7 @@ __all__ = [
     "PQCacheTopKConfigBuilder",
     "QuestTopKConfigBuilder",
     "RandomSamplingConfigBuilder",
+    "ScaNNTopKConfigBuilder",
     "SocketTopKConfigBuilder",
     "get_config_builder",
     "get_all_config_builders",

@@ -29,6 +29,8 @@ class TestMaskerImports:
             OracleTopKConfig,
             PQCache,
             PQCacheConfig,
+            ScaNNTopKMasker,
+            ScaNNTopKMaskerConfig,
             SinkMasker,
             SinkMaskerConfig,
             TopKMasker,
@@ -43,6 +45,7 @@ class TestMaskerImports:
         assert SinkMasker is not None
         assert OracleTopK is not None
         assert PQCache is not None
+        assert ScaNNTopKMasker is not None
         assert HashAttentionTopKMasker is not None
         assert DoubleSparsityTopKMasker is not None
 
@@ -51,6 +54,7 @@ class TestMaskerImports:
         assert SinkMaskerConfig is not None
         assert OracleTopKConfig is not None
         assert PQCacheConfig is not None
+        assert ScaNNTopKMaskerConfig is not None
         assert HashAttentionTopKMaskerConfig is not None
         assert DoubleSparsityTopKMaskerConfig is not None
         assert TopKMaskerConfig is not None
