@@ -18,6 +18,8 @@ from . import (
     ruler,
     ruler16k,
     ruler32k,
+    ruler64k,
+    ruler128k,
     zero_scrolls,
 )
 
@@ -66,4 +68,6 @@ __all__ = [
     "zero_scrolls",
     "ruler32k",
     "ruler16k",
+    "ruler64k",
+    "ruler128k",
 ]
