@@ -24,7 +24,7 @@ from sparse_attention_hub.sparse_attention.utils.mask import Mask
 
 from .pq_top_k import PQCache, PQCacheConfig
 
-#keeps a fully masked row a valid distribution, and bounds the 1 / pi weight
+# keeps a fully masked row a valid distribution, and bounds the 1 / pi weight
 _PROB_FLOOR: float = 1e-9
 _MIN_INCLUSION_PROBABILITY: float = 1e-4
 
@@ -47,8 +47,8 @@ class PQImportanceConfig(PQCacheConfig):
 
     def __post_init__(self) -> None:
         """Validate configuration parameters."""
-        #not calling super(): TopKMaskerConfig requires heavy_size > 0, but
-        #heavy_size == 0 (pure importance sampling) is valid here
+        # not calling super(): TopKMaskerConfig requires heavy_size > 0, but
+        # heavy_size == 0 (pure importance sampling) is valid here
         if self.heavy_size < 0:
             raise ValueError(f"heavy_size must be >= 0, got {self.heavy_size}")
 
@@ -120,7 +120,7 @@ class PQImportance(PQCache):
         tensor_dims: AttentionTensorDimensions = self._extract_tensor_dimensions(
             keys, queries
         )
-        #budget is split across the two strata
+        # budget is split across the two strata
         effective_heavy_size: int = self._calculate_effective_size(
             self.heavy_size, tensor_dims.seq_len_keys
         )
@@ -135,7 +135,7 @@ class PQImportance(PQCache):
                 tensor_dims, previous_mask.dtype, previous_mask.device
             )
 
-        #quantization and scoring are inherited from PQCache unchanged
+        # quantization and scoring are inherited from PQCache unchanged
         self._initialize_pq_cache(sparse_meta_data, layer_idx)
         centroids: torch.Tensor
         codebook: torch.Tensor
@@ -182,12 +182,12 @@ class PQImportance(PQCache):
         num_scored: int = scores.shape[-1]
         key_slice: slice = slice(self.init_offset, self.init_offset + num_scored)
 
-        #approximate logits of the true attention distribution
+        # approximate logits of the true attention distribution
         logits: torch.Tensor = scores.to(torch.float32) * scaling
         if attention_mask is not None:
             logits = logits + attention_mask[:, :, :, key_slice].to(torch.float32)
 
-        #positions already selected by earlier maskers are not candidates
+        # positions already selected by earlier maskers are not candidates
         neg_inf: float = torch.finfo(logits.dtype).min
         previous_dense: torch.Tensor = previous_mask.get_dense_mask()[
             :, :, :, key_slice
@@ -201,7 +201,7 @@ class PQImportance(PQCache):
             top_k_indices: torch.Tensor = torch.topk(
                 logits, k=min(num_heavy, num_scored), dim=-1, largest=True
             ).indices
-            #kept with probability 1 and removed from the sampling pool
+            # kept with probability 1 and removed from the sampling pool
             logits.scatter_(dim=-1, index=top_k_indices, value=neg_inf)
             row_wise_indices.append(top_k_indices)
             row_wise_data.append(
@@ -301,7 +301,7 @@ class PQImportance(PQCache):
         batch_size, num_heads, seq_len_queries, num_scored = logits.shape
 
         probabilities: torch.Tensor = torch.softmax(logits / self.temperature, dim=-1)
-        #a fully masked row softmaxes to nan; the floor makes it uniform instead
+        # a fully masked row softmaxes to nan; the floor makes it uniform instead
         probabilities = torch.nan_to_num(probabilities, nan=0.0) + _PROB_FLOOR
         probabilities = probabilities / probabilities.sum(dim=-1, keepdim=True)
 
@@ -313,7 +313,7 @@ class PQImportance(PQCache):
             probabilities, dim=-1, index=sampled_indices
         ).clamp(min=0.0, max=1.0)
 
-        #pi = 1 - (1 - p)^m over m draws, computed stably; p == 1 gives pi == 1
+        # pi = 1 - (1 - p)^m over m draws, computed stably; p == 1 gives pi == 1
         inclusion_probabilities: torch.Tensor = -torch.expm1(
             num_samples * torch.log1p(-sampled_probabilities)
         )
