@@ -211,7 +211,7 @@ class PQImportance(PQCache):
         if num_samples > 0:
             sampled_indices: torch.Tensor
             inclusion_probabilities: torch.Tensor
-            sampled_indices, inclusion_probabilities = self._importance_sample(
+            sampled_indices, inclusion_probabilities = self._importance_sample_gumbel(
                 logits, num_samples
             )
             row_wise_indices.append(sampled_indices)
@@ -226,7 +226,6 @@ class PQImportance(PQCache):
             dims.seq_len_queries,
             dims.seq_len_keys,
         )
-        #"dense" de-duplicates the repeated draws of with-replacement sampling
         return Mask.create_from_row_wise_idx(
             shape=mask_shape,
             row_wise_idx=indices,
@@ -234,6 +233,63 @@ class PQImportance(PQCache):
             mask_type="dense",
             dtype=previous_mask.dtype,
         )
+
+    def _importance_sample_gumbel(
+        self, logits: torch.Tensor, num_samples: int
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Draw num_samples distinct keys per row using Gumbel-top-k.
+
+        Returns:
+            sampled_indices: [..., num_samples]
+            inclusion_probabilities: [..., num_samples]
+        """
+        scaled_logits: torch.Tensor = logits.to(torch.float32) / self.temperature
+        num_scored: int = scaled_logits.shape[-1]
+        actual_samples: int = min(num_samples, num_scored)
+
+        u: torch.Tensor = torch.rand_like(scaled_logits).clamp_(1e-9, 1.0 - 1e-9)
+        gumbel: torch.Tensor = -torch.log(-torch.log(u))
+        perturbed_logits: torch.Tensor = scaled_logits + gumbel
+
+        if num_scored > actual_samples:
+            top_values: torch.Tensor
+            top_indices: torch.Tensor
+            top_values, top_indices = torch.topk(
+                perturbed_logits,
+                k=actual_samples + 1,
+                dim=-1,
+                largest=True,
+                sorted=True,
+            )
+            sampled_indices: torch.Tensor = top_indices[..., :actual_samples]
+            threshold: torch.Tensor = top_values[
+                ..., actual_samples : actual_samples + 1
+            ]
+            sampled_logits: torch.Tensor = torch.gather(
+                scaled_logits,
+                dim=-1,
+                index=sampled_indices,
+            )
+            inclusion_probabilities: torch.Tensor = -torch.expm1(
+                -torch.exp(sampled_logits - threshold)
+            )
+            inclusion_probabilities = inclusion_probabilities.clamp(
+                min=_MIN_INCLUSION_PROBABILITY,
+                max=1.0,
+            )
+        else:
+            sampled_indices = torch.topk(
+                perturbed_logits,
+                k=actual_samples,
+                dim=-1,
+                largest=True,
+                sorted=True,
+            ).indices
+            inclusion_probabilities = torch.ones_like(
+                sampled_indices, dtype=scaled_logits.dtype
+            )
+
+        return sampled_indices, inclusion_probabilities
 
     def _importance_sample(
         self, logits: torch.Tensor, num_samples: int
