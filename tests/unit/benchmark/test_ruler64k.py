@@ -79,9 +79,9 @@ _TEMPLATES = {
     ),
 }
 
-# Families whose question anchor occurs twice -- as a context preamble
-# (cwe, qa) or as a one-shot worked example (vt) -- and again as the real
-# trailing question.  The split must take the LAST occurrence.
+# Families whose question anchor occurs twice -- qa restates its opening
+# instruction, cwe and vt each embed a worked one-shot example -- and again as
+# the real trailing question.  The split must take the LAST occurrence.
 _REPEATED_ANCHOR_FAMILIES = ["cwe", "qa", "vt"]
 
 
