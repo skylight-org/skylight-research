@@ -32,9 +32,17 @@ _TEMPLATES = {
         "The special magic number for pale-cactus mentioned in the provided "
         "text is"
     ),
+    # RULER puts a fully worked one-shot example near the top of every vt
+    # prompt (char 1079 of 244718 in the real 64k data), so vt's question
+    # anchor genuinely occurs twice -- exercise the last-match rule on it.
     "vt": (
         "Memorize and track the chain(s) of variable assignment hidden in the "
         "following text.\n"
+        "{haystack}\n"
+        "Question: Find all variables that are assigned the value 64886 in the "
+        "text above."
+        "Answer: According to the chain(s) of variable assignment in the text "
+        "above, 5 variables are assigned the value 64886, they are:  SGM LJP\n"
         "{haystack}\n"
         "Question: Find all variables that are assigned the value 12345 in the "
         "text above."
@@ -71,9 +79,10 @@ _TEMPLATES = {
     ),
 }
 
-# Families whose instruction is stated twice: once as a context preamble and
-# once as the real trailing question.  The split must take the LAST occurrence.
-_REPEATED_ANCHOR_FAMILIES = ["cwe", "qa"]
+# Families whose question anchor occurs twice -- as a context preamble
+# (cwe, qa) or as a one-shot worked example (vt) -- and again as the real
+# trailing question.  The split must take the LAST occurrence.
+_REPEATED_ANCHOR_FAMILIES = ["cwe", "qa", "vt"]
 
 
 def _raw_input(family: str, haystack: str = "HAYSTACK " * 16) -> str:
@@ -559,10 +568,11 @@ class TestRuler128KPrepareDataframe:
 
     @pytest.mark.parametrize("family", _REPEATED_ANCHOR_FAMILIES)
     def test_split_uses_last_question_anchor(self, family):
-        """cwe/qa state their instruction twice; the LAST one is the boundary.
+        """cwe/qa/vt repeat the anchor; the LAST one is the boundary.
 
         A first-match regression would move the whole haystack into `question`
-        and leave a two-sentence context -- plausible-looking, and wrong.
+        and leave only the preamble (cwe/qa) or the one-shot example (vt) as
+        context -- plausible-looking, and wrong.
         """
         from benchmark.ruler128k.prepare_dataframe import QUESTION_PATTERNS
 
@@ -658,3 +668,50 @@ class TestRuler128KPrepareDataframe:
         assert "❌" in captured
         assert "⚠️" in captured
         assert "fwe" in captured
+
+
+class TestRuler128KMetricRouting:
+    """The qa-vs-everything-else metric split in calculate_metrics."""
+
+    @pytest.mark.parametrize(
+        "task,expected",
+        [
+            # string_match_part: credit for matching ANY one gold.
+            ("qa_1", 100.0),
+            ("qa_2", 100.0),
+            # string_match_all: credit for the FRACTION of golds matched.
+            ("vt", 50.0),
+            ("fwe", 50.0),
+            ("cwe", 50.0),
+            ("niah_multikey_2", 50.0),
+            ("niah_single_1", 50.0),
+        ],
+    )
+    def test_qa_uses_part_and_every_other_family_uses_all(self, task, expected):
+        """Routing is one `task.split("_")[0] == "qa"` branch -- pin both sides.
+
+        The two metrics only disagree on multi-gold rows, so a single gold
+        cannot detect a mis-route. With two golds and one hit, `part` scores
+        100 and `all` scores 50.
+        """
+        df = pd.DataFrame(
+            {
+                "task": [task],
+                "answer": [np.array(["alpha", "beta"], dtype=object)],
+                "predicted_answer": ["the answer is alpha"],
+            }
+        )
+
+        assert calculate_metrics(df)[task]["string_match"] == expected
+
+    def test_family_routing_uses_name_prefix_not_substring(self):
+        """`niah_multiquery` must not route to qa just because it ends in 'query'."""
+        df = pd.DataFrame(
+            {
+                "task": ["niah_multiquery"],
+                "answer": [np.array(["alpha", "beta"], dtype=object)],
+                "predicted_answer": ["the answer is alpha"],
+            }
+        )
+
+        assert calculate_metrics(df)["niah_multiquery"]["string_match"] == 50.0

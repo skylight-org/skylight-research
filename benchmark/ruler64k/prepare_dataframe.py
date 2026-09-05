@@ -70,11 +70,13 @@ def split_context_question(text: str, task: str) -> Tuple[str, str, str]:
 
     ``context + question + answer_prefix == text`` holds exactly.
 
-    The ``cwe`` and ``qa_*`` templates state their instruction twice -- once as a
-    preamble before the haystack and once again as the real question -- so the
-    *last* match is the boundary.  Using the first match would move the entire
-    document set into ``question`` and leave a two-sentence ``context``, which
-    produces plausible-looking but meaningless scores.
+    Three of the five families state their question anchor twice, so the *last*
+    match is the boundary: ``cwe`` and ``qa_*`` repeat the instruction as a
+    preamble before the haystack, and ``vt`` carries a fully worked one-shot
+    example near the top of the prompt.  Using the first match would move the
+    entire haystack into ``question`` and leave a stub ``context`` -- measured
+    on the real 64k data, 0.4% of the prompt for ``vt`` and two sentences for
+    ``cwe``/``qa_*`` -- which produces plausible-looking but meaningless scores.
 
     Args:
         text: The raw RULER sample text.
