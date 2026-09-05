@@ -1,5 +1,5 @@
 """
-:summary: Tests for the PQImportance (PQ importance sampling) masker.
+:summary: Tests for the PQImportance (Gumbel-sampled PQCache) masker.
 """
 
 import pytest
@@ -23,19 +23,12 @@ class TestPQImportanceConfig:
             PQImportanceConfig,
         )
 
-        config = PQImportanceConfig(heavy_size=10, sample_size=20, **_pq_kwargs(4))
+        config = PQImportanceConfig(heavy_size=10, **_pq_kwargs(4))
         assert config.heavy_size == 10
-        assert config.sample_size == 20
         assert config.temperature == 1.0
 
-    def test_config_allows_zero_heavy_size(self):
-        """Pure importance sampling is valid, unlike for other top-k maskers."""
-        from sparse_attention_hub.sparse_attention.research_attention.maskers.fixed.implementations import (
-            PQImportanceConfig,
-        )
-
-        config = PQImportanceConfig(heavy_size=0, sample_size=0.1, **_pq_kwargs())
-        assert config.heavy_size == 0
+        config = PQImportanceConfig(heavy_size=0.1, temperature=2.5, **_pq_kwargs())
+        assert config.temperature == 2.5
 
     def test_config_validation(self):
         from sparse_attention_hub.sparse_attention.research_attention.maskers.fixed.implementations import (
@@ -43,19 +36,12 @@ class TestPQImportanceConfig:
         )
 
         with pytest.raises(ValueError):
-            PQImportanceConfig(heavy_size=0, sample_size=0, **_pq_kwargs())
+            PQImportanceConfig(heavy_size=0, **_pq_kwargs())
         with pytest.raises(ValueError):
-            PQImportanceConfig(heavy_size=-1, sample_size=10, **_pq_kwargs())
-        with pytest.raises(ValueError):
-            PQImportanceConfig(heavy_size=10, sample_size=-1, **_pq_kwargs())
-        with pytest.raises(ValueError):
-            PQImportanceConfig(
-                heavy_size=10, sample_size=10, temperature=0.0, **_pq_kwargs()
-            )
+            PQImportanceConfig(heavy_size=10, temperature=-1.0, **_pq_kwargs())
         with pytest.raises(ValueError):
             PQImportanceConfig(
                 heavy_size=10,
-                sample_size=10,
                 pq_group_factor=2,
                 pq_bits=4,
                 kmeans_iter=3,
@@ -76,11 +62,12 @@ class TestPQImportanceConfig:
             PQImportanceConfig,
         )
 
-        config = PQImportanceConfig(heavy_size=10, sample_size=10, **_pq_kwargs(4))
+        config = PQImportanceConfig(heavy_size=10, **_pq_kwargs(4))
         masker = PQImportance.create_from_config(config)
         assert type(masker) is PQImportance
         assert isinstance(masker, PQCache)
         assert isinstance(masker, TopKMasker)
+        assert masker.temperature == 1.0
         # registry dispatches on the config type
         assert type(ResearchMasker.create_masker_from_config(config)) is PQImportance
 
@@ -94,6 +81,48 @@ class TestPQImportanceConfig:
             PQImportance.create_from_config(
                 PQCacheConfig(heavy_size=10, **_pq_kwargs(4))
             )
+
+
+@pytest.mark.unit
+class TestGumbelNoise:
+    """The Gumbel-top-k trick itself, independent of PQ."""
+
+    def test_noise_matches_gumbel_distribution(self):
+        from sparse_attention_hub.sparse_attention.research_attention.maskers.fixed.implementations.pq_importance import (
+            _sample_gumbel_noise,
+        )
+
+        torch.manual_seed(0)
+        noise = _sample_gumbel_noise(torch.zeros(200_000))
+        assert torch.isfinite(noise).all()
+        # Gumbel(0, 1): mean = Euler-Mascheroni, std = pi / sqrt(6)
+        assert abs(float(noise.mean()) - 0.5772) < 0.02
+        assert abs(float(noise.std()) - 1.2825) < 0.02
+
+    def test_noise_keeps_score_dtype(self):
+        from sparse_attention_hub.sparse_attention.research_attention.maskers.fixed.implementations.pq_importance import (
+            _sample_gumbel_noise,
+        )
+
+        scores = torch.zeros(4, 8, dtype=torch.float16)
+        noise = _sample_gumbel_noise(scores)
+        assert noise.dtype == torch.float16
+        assert noise.shape == scores.shape
+        assert torch.isfinite(noise).all()
+
+    def test_argmax_of_perturbed_logits_follows_softmax(self):
+        """Gumbel-top-1 samples from softmax(logits); the point of the masker."""
+        from sparse_attention_hub.sparse_attention.research_attention.maskers.fixed.implementations.pq_importance import (
+            _sample_gumbel_noise,
+        )
+
+        torch.manual_seed(0)
+        logits = torch.tensor([2.0, 1.0, 0.0, -1.0])
+        trials = 40_000
+        batched = logits.expand(trials, -1)
+        picks = (batched + _sample_gumbel_noise(batched)).argmax(dim=-1)
+        empirical = torch.bincount(picks, minlength=logits.numel()) / trials
+        assert torch.allclose(empirical, torch.softmax(logits, dim=-1), atol=0.01)
 
 
 @pytest.mark.unit
@@ -113,15 +142,10 @@ class TestPQImportanceMask:
         return keys, queries, values, head_dim**-0.5
 
     @staticmethod
-    def _add_mask(masker, keys, queries, values, scaling, meta, attention_mask=None):
+    def _add_mask(masker, keys, queries, values, scaling, meta):
         from sparse_attention_hub.sparse_attention.utils.mask import Mask
 
-        shape = (
-            queries.shape[0],
-            queries.shape[1],
-            queries.shape[2],
-            keys.shape[2],
-        )
+        shape = (queries.shape[0], queries.shape[1], queries.shape[2], keys.shape[2])
         previous_mask = Mask.create_empty_mask(
             shape, dtype=torch.float32, device=keys.device
         )
@@ -129,7 +153,7 @@ class TestPQImportanceMask:
             keys=keys,
             queries=queries,
             values=values,
-            attention_mask=attention_mask,
+            attention_mask=None,
             scaling=scaling,
             dropout=0.0,
             sparse_meta_data=meta,
@@ -137,33 +161,26 @@ class TestPQImportanceMask:
             layer_idx=0,
         )
 
-    def test_mask_values_are_probabilities_and_within_budget(self):
+    def test_mask_is_binary_and_within_budget(self):
         from sparse_attention_hub.sparse_attention.research_attention.maskers.fixed.implementations import (
             PQImportance,
             PQImportanceConfig,
         )
 
         keys, queries, values, scaling = self._setup()
-        masker = PQImportance(
-            PQImportanceConfig(heavy_size=16, sample_size=16, **_pq_kwargs(8))
-        )
-        mask = self._add_mask(masker, keys, queries, values, scaling, {})
+        masker = PQImportance(PQImportanceConfig(heavy_size=32, **_pq_kwargs(8)))
+        dense = self._add_mask(
+            masker, keys, queries, values, scaling, {}
+        ).get_dense_mask()
 
-        dense = mask.get_dense_mask()
         active = dense > 0
-        assert dense.max() <= 1.0
-        assert dense.min() >= 0.0
-        # heavy positions are kept with probability one
-        assert (dense == 1.0).any()
-        # with-replacement sampling can only produce fewer distinct positions
-        num_active = active.sum(dim=-1)
-        assert bool((num_active <= 16 + 16).all())
-        assert bool((num_active > 16).all())
+        # selection is a plain top-k mask; only the ranking is randomised
+        assert set(dense.unique().tolist()) == {0.0, 1.0}
+        assert bool((active.sum(dim=-1) == 32).all())
         # nothing is selected inside the sink (init_offset) region
         assert not bool(active[:, :, :, :8].any())
 
-    def test_sample_size_zero_matches_pq_cache(self):
-        """heavy-only configuration degenerates to plain PQCache top-k."""
+    def test_zero_temperature_matches_pq_cache(self):
         from sparse_attention_hub.sparse_attention.research_attention.maskers.fixed.implementations import (
             PQCache,
             PQCacheConfig,
@@ -172,39 +189,52 @@ class TestPQImportanceMask:
         )
 
         keys, queries, values, scaling = self._setup()
-        importance = PQImportance(
-            PQImportanceConfig(heavy_size=32, sample_size=0, **_pq_kwargs(8))
+        sampled = PQImportance(
+            PQImportanceConfig(heavy_size=32, temperature=0.0, **_pq_kwargs(8))
         )
         top_k = PQCache(PQCacheConfig(heavy_size=32, **_pq_kwargs(8)))
 
         torch.manual_seed(1)
-        mask_importance = self._add_mask(
-            importance, keys, queries, values, scaling, {}
+        mask_sampled = self._add_mask(
+            sampled, keys, queries, values, scaling, {}
         ).get_dense_mask()
         torch.manual_seed(1)
         mask_top_k = self._add_mask(
             top_k, keys, queries, values, scaling, {}
         ).get_dense_mask()
 
-        assert torch.equal(mask_importance, mask_top_k)
+        assert torch.equal(mask_sampled, mask_top_k)
 
-    def test_masked_out_keys_are_never_selected(self):
+    def test_temperature_makes_selection_stochastic(self):
+        """Different draws pick different keys, but stay near the top scores."""
         from sparse_attention_hub.sparse_attention.research_attention.maskers.fixed.implementations import (
+            PQCache,
+            PQCacheConfig,
             PQImportance,
             PQImportanceConfig,
         )
 
         keys, queries, values, scaling = self._setup()
-        attention_mask = torch.zeros(1, 1, queries.shape[2], keys.shape[2])
-        attention_mask[..., -32:] = float("-inf")
-
         masker = PQImportance(
-            PQImportanceConfig(heavy_size=16, sample_size=16, **_pq_kwargs(8))
+            PQImportanceConfig(heavy_size=32, temperature=1.0, **_pq_kwargs(8))
         )
-        mask = self._add_mask(
-            masker, keys, queries, values, scaling, {}, attention_mask=attention_mask
-        )
-        assert not bool((mask.get_dense_mask()[..., -32:] > 0).any())
+        meta = {}
+        torch.manual_seed(2)
+        first = self._add_mask(
+            masker, keys, queries, values, scaling, meta
+        ).get_dense_mask()
+        second = self._add_mask(
+            masker, keys, queries, values, scaling, meta
+        ).get_dense_mask()
+        assert not torch.equal(first, second)
+
+        top_k = PQCache(PQCacheConfig(heavy_size=32, **_pq_kwargs(8)))
+        deterministic = self._add_mask(
+            top_k, keys, queries, values, scaling, {}
+        ).get_dense_mask()
+        # sampling still concentrates on the keys top-k would have chosen
+        overlap = (first.bool() & deterministic.bool()).sum(dim=-1).float().mean()
+        assert float(overlap) > 16
 
     def test_full_attention_for_short_sequences(self):
         from sparse_attention_hub.sparse_attention.research_attention.maskers.fixed.implementations import (
@@ -213,9 +243,7 @@ class TestPQImportanceMask:
         )
 
         keys, queries, values, scaling = self._setup(seq_len_keys=32)
-        masker = PQImportance(
-            PQImportanceConfig(heavy_size=8, sample_size=8, **_pq_kwargs())
-        )
+        masker = PQImportance(PQImportanceConfig(heavy_size=16, **_pq_kwargs()))
         mask = self._add_mask(masker, keys, queries, values, scaling, {})
         assert mask.is_full_mask()
 
@@ -226,9 +254,7 @@ class TestPQImportanceMask:
         )
 
         keys, queries, values, scaling = self._setup()
-        masker = PQImportance(
-            PQImportanceConfig(heavy_size=16, sample_size=16, **_pq_kwargs(8))
-        )
+        masker = PQImportance(PQImportanceConfig(heavy_size=32, **_pq_kwargs(8)))
         meta = {}
         self._add_mask(masker, keys, queries, values, scaling, meta)
         centroids = meta["pq_centroids"][0]
@@ -244,39 +270,35 @@ class TestPQImportanceMask:
         assert meta["pq_codebook"][0].shape[1] == new_keys.shape[2] - 8
         assert mask.shape == (1, queries.shape[1], 1, new_keys.shape[2])
 
-    def test_estimator_is_unbiased(self):
-        """1/inclusion-probability weighting must recover the softmax denominator.
-
-        Top-k truncation systematically under-estimates it; importance sampling
-        should not.
-        """
+    def test_previously_selected_keys_are_not_reselected(self):
         from sparse_attention_hub.sparse_attention.research_attention.maskers.fixed.implementations import (
-            PQCache,
-            PQCacheConfig,
             PQImportance,
             PQImportanceConfig,
         )
+        from sparse_attention_hub.sparse_attention.utils.mask import Mask
 
-        keys, queries, values, scaling = self._setup(seq_len_keys=512, seed=3)
-        logits = torch.matmul(queries, keys.transpose(-2, -1)) * scaling
-        exp_weights = torch.exp(logits - logits.max(dim=-1, keepdim=True).values)
-        true_denominator = exp_weights.sum(dim=-1)
-
-        def mean_denominator(masker, trials):
-            meta = {}
-            estimates = []
-            for _ in range(trials):
-                mask = self._add_mask(masker, keys, queries, values, scaling, meta)
-                estimates.append(mask.apply_inv_mask(exp_weights).sum(dim=-1))
-            return torch.stack(estimates).mean(dim=0)
-
-        torch.manual_seed(7)
-        importance = PQImportance(
-            PQImportanceConfig(heavy_size=16, sample_size=48, **_pq_kwargs())
+        keys, queries, values, scaling = self._setup()
+        shape = (queries.shape[0], queries.shape[1], queries.shape[2], keys.shape[2])
+        previous_dense = torch.zeros(shape, dtype=torch.float32)
+        previous_dense[..., 8:24] = 1.0
+        previous_mask = Mask.create_mask_from_dense_mask(
+            shape, previous_dense, dtype=torch.float32
         )
-        importance_ratio = (mean_denominator(importance, 200) / true_denominator).mean()
-        top_k = PQCache(PQCacheConfig(heavy_size=64, **_pq_kwargs()))
-        top_k_ratio = (mean_denominator(top_k, 1) / true_denominator).mean()
 
-        assert abs(float(importance_ratio) - 1.0) < 0.05
-        assert float(top_k_ratio) < float(importance_ratio)
+        masker = PQImportance(PQImportanceConfig(heavy_size=32, **_pq_kwargs(8)))
+        mask = masker.add_mask(
+            keys=keys,
+            queries=queries,
+            values=values,
+            attention_mask=None,
+            scaling=scaling,
+            dropout=0.0,
+            sparse_meta_data={},
+            previous_mask=previous_mask,
+            layer_idx=0,
+        )
+
+        active = mask.get_dense_mask() > 0
+        # the 16 pre-selected keys are kept and 32 fresh ones are added
+        assert bool(active[..., 8:24].all())
+        assert bool((active.sum(dim=-1) == 16 + 32).all())
