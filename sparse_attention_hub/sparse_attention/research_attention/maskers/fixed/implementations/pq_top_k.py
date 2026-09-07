@@ -520,21 +520,33 @@ class PQCache(TopKMasker):
         masked_scores: torch.Tensor = scores.clone()
         masked_scores[previous_dense_pq != 0] = torch.finfo(scores.dtype).min
 
-        # Select top-K indices
-        _, topk_indices = torch.topk(
-            masked_scores, k=effective_heavy_size, dim=-1, largest=True
+        topk_indices, weights = self._select_from_scores(
+            masked_scores, effective_heavy_size
         )
 
         # Adjust indices to account for init_offset
         topk_indices_adjusted: torch.Tensor = topk_indices + self.init_offset
 
-        # Create mask from indices
         return self._create_mask_from_rowise_indices(
             dims,
             topk_indices_adjusted,
             device,
             previous_mask.dtype,
+            data=weights,
         )
+
+    def _select_from_scores(
+        self, scores: torch.Tensor, k: int
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Pick the k highest-scoring keys and return unit mask weights.
+
+        Subclasses (e.g. PQImportance) override this to sample and reweight.
+        """
+        indices: torch.Tensor = torch.topk(
+            scores, k=k, dim=-1, largest=True
+        ).indices
+        weights: torch.Tensor = torch.ones_like(indices, dtype=scores.dtype)
+        return indices, weights
 
     @classmethod
     def create_from_config(cls, config: MaskerConfig) -> "PQCache":

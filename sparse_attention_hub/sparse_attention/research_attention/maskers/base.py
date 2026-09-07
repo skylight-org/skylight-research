@@ -131,15 +131,25 @@ class ResearchMasker(ABC):
         indices: torch.Tensor,
         device: torch.device,
         dtype: torch.dtype,
+        data: Optional[torch.Tensor] = None,
     ) -> Mask:
-        """Create mask from row-wise indices."""
+        """Create mask from row-wise indices.
+
+        Args:
+            data: Optional per-index mask values. Defaults to 1.0 at every
+                selected position (hard top-k). Importance-sampling maskers
+                pass Horvitz-Thompson weights here.
+        """
         mask_shape: Tuple[int, int, int, int] = (
             dims.batch_size,
             dims.num_heads,
             dims.seq_len_queries,
             dims.seq_len_keys,
         )
-        data: torch.Tensor = torch.ones_like(indices, dtype=dtype, device=device)
+        if data is None:
+            data = torch.ones_like(indices, dtype=dtype, device=device)
+        else:
+            data = data.to(dtype=dtype, device=device)
 
         return Mask.create_from_row_wise_idx(
             shape=mask_shape,
