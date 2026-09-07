@@ -23,9 +23,21 @@ MicroMetricLogger.register_metric("research_attention_output_error", float)
 
 @dataclass
 class ResearchAttentionConfig(SparseAttentionConfig):
-    """Configuration class for research attention mechanisms."""
+    """Configuration class for research attention mechanisms.
+
+    Attributes:
+        masker_configs: Maskers applied sequentially, each on the previous one's mask.
+        apply_to_layer_types: Restricts sparse attention to layers whose entry in
+            ``model.config.layer_types`` is in this tuple. ``None`` (the default) applies
+            sparse attention to every layer, which is the legacy behaviour and the only
+            behaviour for models without a ``layer_types`` config (e.g. Llama, Qwen2.5).
+            For hybrid sliding/full models such as Olmo-3 or Gemma-3, passing
+            ``("full_attention",)`` leaves the sliding-window layers running exact dense
+            attention and suppresses their density/error micro-metrics.
+    """
 
     masker_configs: List[MaskerConfig]
+    apply_to_layer_types: Optional[Tuple[str, ...]] = None
 
 
 class ResearchAttention(SparseAttention):
@@ -60,6 +72,34 @@ class ResearchAttention(SparseAttention):
 
         self.maskers = maskers
 
+        # getattr keeps subclassed / older pickled configs working.
+        self.apply_to_layer_types: Optional[Tuple[str, ...]] = getattr(
+            sparse_attention_config, "apply_to_layer_types", None
+        )
+
+    def _applies_to_layer(self, module: nn.Module, kwargs: Dict[str, Any]) -> bool:
+        """Whether sparse attention should be applied to the layer owning ``module``.
+
+        Gates on ``module.config.layer_types[layer_idx]`` rather than an ``attention_type``
+        attribute: Olmo-3 sets ``attention_type`` on the attention module, but Qwen3 and
+        GPT-OSS set it on the decoder layer, and ``module`` here is the attention module.
+
+        Returns True (sparse) whenever the model exposes no hybrid structure, so
+        non-hybrid models are unaffected.
+        """
+        if self.apply_to_layer_types is None:
+            return True
+
+        layer_types: Any = getattr(getattr(module, "config", None), "layer_types", None)
+        if not layer_types:
+            return True
+
+        layer_idx: Any = kwargs.get("layer_idx", getattr(module, "layer_idx", None))
+        if not isinstance(layer_idx, int) or layer_idx >= len(layer_types):
+            return True
+
+        return bool(layer_types[layer_idx] in self.apply_to_layer_types)
+
     def custom_attention(
         self,
         module: nn.Module,
@@ -93,6 +133,28 @@ class ResearchAttention(SparseAttention):
             )
         sparse_meta_data: Dict[Any, Any] = kwargs.pop("sparse_meta_data")
 
+        # Layer-type gating: run exact dense attention on excluded layers and emit no
+        # micro-metrics for them. The mask HuggingFace passed in is already the correct
+        # per-layer mask (e.g. causal AND sliding-window), so this reproduces the model's
+        # native dense attention for that layer.
+        if not self._applies_to_layer(module, kwargs):
+            if kwargs.get("s_aux") is not None:
+                raise NotImplementedError(
+                    "apply_to_layer_types is not supported for attention-sink models: "
+                    "the dense fallback does not apply the s_aux sink bias."
+                )
+            kwargs.pop("s_aux", None)
+            return get_true_attention_output(
+                module,
+                queries,
+                keys,
+                values,
+                attention_mask,
+                scaling,
+                dropout,
+                **kwargs,
+            )
+
         # Create an empty Mask object
         mask_shape: Tuple[int, int, int, int] = (
             queries.shape[0],
@@ -122,7 +184,11 @@ class ResearchAttention(SparseAttention):
             MicroMetricLogger().log(
                 "research_attention_density",
                 sparse_attention_mask.get_density(),
-                metadata={"layer_idx": kwargs["layer_idx"]},
+                metadata={
+                    "layer_idx": kwargs["layer_idx"],
+                    "q_len": queries.shape[2],
+                    "k_len": keys.shape[2],
+                },
             )
 
         s_aux_raw: Any = kwargs.pop("s_aux", None)
@@ -164,7 +230,11 @@ class ResearchAttention(SparseAttention):
             MicroMetricLogger().log(
                 "research_attention_output_error",
                 float(error.item()),
-                metadata={"layer_idx": kwargs["layer_idx"]},
+                metadata={
+                    "layer_idx": kwargs["layer_idx"],
+                    "q_len": queries.shape[2],
+                    "k_len": keys.shape[2],
+                },
             )
 
         return attention_output, attention_weights

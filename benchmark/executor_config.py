@@ -4,6 +4,8 @@ This module provides configuration dataclasses and factory functions for orchest
 parallel benchmark execution across multiple GPUs using multiprocessing.
 """
 
+import hashlib
+import json
 import logging
 import os
 from dataclasses import dataclass, field
@@ -96,6 +98,10 @@ class AdapterConfig:
         adapter_name: Name of the adapter type (default: "huggingface")
         model_kwargs: Additional keyword arguments for model creation
         tokenizer_kwargs: Additional keyword arguments for tokenizer creation
+        revision: Optional HuggingFace revision (branch, tag or commit sha) pinning both
+            the model weights and the tokenizer, e.g. "stage1-step10000". Merged into
+            model_kwargs/tokenizer_kwargs by the adapter, which makes it part of the
+            ModelServer cache key.
     
     Example:
         >>> config = AdapterConfig(
@@ -107,6 +113,7 @@ class AdapterConfig:
     adapter_name: str = "huggingface"
     model_kwargs: Optional[Dict[str, Any]] = None
     tokenizer_kwargs: Optional[Dict[str, Any]] = None
+    revision: Optional[str] = None
     
     def __post_init__(self) -> None:
         """Initialize default values and validate configuration."""
@@ -361,6 +368,15 @@ def generate_benchmark_stubs(
         generation_kwargs = {}
     if request_kwargs is None:
         request_kwargs = {}
+
+    # Match the adapter's revision overrides and isolate resumable checkpoint results.
+    revisions = (
+        (adapter_config.model_kwargs or {}).get("revision", adapter_config.revision),
+        (adapter_config.tokenizer_kwargs or {}).get("revision", adapter_config.revision),
+    )
+    if any(revision is not None for revision in revisions):
+        revision_key = hashlib.sha256(json.dumps(revisions).encode()).hexdigest()[:16]
+        base_result_dir = os.path.join(base_result_dir, f"revision-{revision_key}")
         
     stubs: List[BenchmarkStub] = []
     
