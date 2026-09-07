@@ -60,7 +60,13 @@ class PQCacheConfig(TopKMaskerConfig):
             raise ValueError(f"metric must be 'euclidean' or 'ip', got '{self.metric}'")
 
 
+@dataclass
+class PQMaskerConfig(PQCacheConfig):
+    """Alias for PQCacheConfig used in vAttention-style configs."""
+
+
 @MaskerRegistry.register(PQCacheConfig)
+@MaskerRegistry.register(PQMaskerConfig)
 class PQCache(TopKMasker):
     """PQ cache-based top-K masker using product quantization for approximate attention."""
 
@@ -140,6 +146,13 @@ class PQCache(TopKMasker):
         scores: torch.Tensor = self._compute_pq_scores(
             queries, keys, centroids, codebook
         )
+        # Later maskers (AdaptiveSampling) Gumbel-sample leftovers from these.
+        if "pq_scores" not in sparse_meta_data:
+            sparse_meta_data["pq_scores"] = {}
+        if "pq_score_offset" not in sparse_meta_data:
+            sparse_meta_data["pq_score_offset"] = {}
+        sparse_meta_data["pq_scores"][layer_idx] = scores
+        sparse_meta_data["pq_score_offset"][layer_idx] = self.init_offset
 
         # Phase 5: Create mask from scores
         pq_mask: Mask = self._create_pq_mask(

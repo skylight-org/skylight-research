@@ -549,3 +549,176 @@ class TestAdaptiveSamplingMasker:
         dense_mask = result.get_dense_mask()
         assert torch.all(torch.isfinite(dense_mask))
         assert not torch.any(torch.isnan(dense_mask))
+
+    def test_importance_sampling_skips_already_selected_keys(
+        self, sample_tensors
+    ):
+        """Gumbel draw must not re-pick keys sink/local/top-k already took."""
+        keys, queries, values, attention_mask = sample_tensors
+        masker = AdaptiveSamplingMasker(
+            AdaptiveSamplingMaskerConfig(
+                base_rate_sampling=0.25,
+                epsilon=0.2,
+                delta=0.2,
+                init_offset=0,
+                local_offset=0,
+                importance_sampling=True,
+            )
+        )
+        shape = (2, 4, 8, 16)
+        previous_dense = torch.zeros(shape)
+        previous_dense[..., :4] = 1.0
+        previous_mask = Mask.create_mask_from_dense_mask(
+            shape, previous_dense, dtype=torch.float32
+        )
+        result = masker.add_mask(
+            keys,
+            queries,
+            values,
+            attention_mask,
+            scaling=1.0,
+            dropout=0.0,
+            sparse_meta_data={},
+            previous_mask=previous_mask,
+        )
+        dense = result.get_dense_mask()
+        assert bool((dense[..., :4] == 1.0).all())
+        newly = (previous_dense == 0) & (dense > 0)
+        assert bool(newly.any())
+        assert not bool(newly[..., :4].any())
+        sampled_values = dense[newly]
+        assert bool((sampled_values > 0).all())
+        assert bool((sampled_values <= 1.0).all())
+
+    def test_uniform_path_still_available(self, masker, sample_tensors):
+        """importance_sampling=False keeps the original vAttention uniform draw."""
+        keys, queries, values, attention_mask = sample_tensors
+        uniform = AdaptiveSamplingMasker(
+            AdaptiveSamplingMaskerConfig(
+                base_rate_sampling=0.1,
+                epsilon=0.1,
+                delta=0.05,
+                init_offset=0,
+                local_offset=0,
+                importance_sampling=False,
+            )
+        )
+        empty_mask = Mask.create_empty_mask(
+            (2, 4, 8, 16), dtype=torch.float32, device=torch.device("cpu")
+        )
+        result = uniform.add_mask(
+            keys,
+            queries,
+            values,
+            attention_mask,
+            scaling=1.0,
+            dropout=0.0,
+            sparse_meta_data={},
+            previous_mask=empty_mask,
+        )
+        assert not result.is_empty
+        assert torch.all(torch.isfinite(result.get_dense_mask()))
+
+
+@pytest.mark.unit
+class TestVAttentionPQCacheImportanceSampling:
+    """Sink + Local + PQCache top-k + AdaptiveSampling Gumbel on leftovers."""
+
+    def test_pq_masker_config_alias_builds_pq_cache(self):
+        from sparse_attention_hub.sparse_attention.research_attention.maskers.base import (
+            ResearchMasker,
+        )
+        from sparse_attention_hub.sparse_attention.research_attention.maskers.fixed.implementations import (
+            PQCache,
+            PQMaskerConfig,
+        )
+
+        config = PQMaskerConfig(
+            heavy_size=8,
+            pq_group_factor=2,
+            pq_bits=4,
+            kmeans_iter=3,
+            init_offset=4,
+            metric="euclidean",
+        )
+        masker = ResearchMasker.create_masker_from_config(config)
+        assert type(masker) is PQCache
+
+    def test_stack_uses_vattention_budget_and_does_not_resample_topk(self):
+        from sparse_attention_hub.sparse_attention.research_attention.maskers.fixed.implementations import (
+            LocalMasker,
+            LocalMaskerConfig,
+            PQCache,
+            PQMaskerConfig,
+            SinkMasker,
+            SinkMaskerConfig,
+        )
+
+        torch.manual_seed(0)
+        seq_len_keys = 256
+        seq_len_queries = 4
+        num_heads = 2
+        head_dim = 16
+        keys = torch.randn(1, num_heads, seq_len_keys, head_dim)
+        queries = torch.randn(1, num_heads, seq_len_queries, head_dim)
+        values = torch.randn(1, num_heads, seq_len_keys, head_dim)
+        scaling = head_dim**-0.5
+        shape = (1, num_heads, seq_len_queries, seq_len_keys)
+        mask = Mask.create_empty_mask(shape, dtype=torch.float32, device=keys.device)
+        meta: dict = {}
+
+        sink = SinkMasker(SinkMaskerConfig(sink_size=4))
+        local = LocalMasker(LocalMaskerConfig(window_size=4))
+        pq = PQCache(
+            PQMaskerConfig(
+                heavy_size=8,
+                pq_group_factor=2,
+                pq_bits=4,
+                kmeans_iter=3,
+                init_offset=4,
+                metric="euclidean",
+            )
+        )
+        sampling = AdaptiveSamplingMasker(
+            AdaptiveSamplingMaskerConfig(
+                base_rate_sampling=0.05,
+                epsilon=0.2,
+                delta=0.2,
+                init_offset=4,
+                local_offset=4,
+                importance_sampling=True,
+            )
+        )
+
+        def _run(m, current):
+            return m.add_mask(
+                keys=keys,
+                queries=queries,
+                values=values,
+                attention_mask=None,
+                scaling=scaling,
+                dropout=0.0,
+                sparse_meta_data=meta,
+                previous_mask=current,
+                layer_idx=0,
+            )
+
+        mask = _run(sink, mask)
+        mask = _run(local, mask)
+        after_topk = _run(pq, mask)
+        topk_dense = after_topk.get_dense_mask()
+        assert 0 in meta["pq_scores"]
+        assert meta["pq_score_offset"][0] == 4
+
+        result = _run(sampling, after_topk)
+        dense = result.get_dense_mask()
+        # sink / local / PQ top-k stay on
+        assert bool((dense[topk_dense == 1] == 1).all())
+        newly = (topk_dense == 0) & (dense > 0)
+        assert bool(newly.any())
+        # sampling window is [4, 256-4)
+        assert not bool(newly[..., :4].any())
+        assert not bool(newly[..., 252:].any())
+        sampled = dense[newly]
+        assert bool((sampled > 0).all() and (sampled <= 1.0).all())
+

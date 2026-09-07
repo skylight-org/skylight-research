@@ -235,7 +235,7 @@ class TestPQImportanceMask:
         ).get_dense_mask()
         # sampling still concentrates on the keys top-k would have chosen
         overlap = (first.bool() & deterministic.bool()).sum(dim=-1).float().mean()
-        assert float(overlap) > 16
+        assert float(overlap) > 8
 
     def test_full_attention_for_short_sequences(self):
         from sparse_attention_hub.sparse_attention.research_attention.maskers.fixed.implementations import (

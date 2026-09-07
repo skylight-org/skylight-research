@@ -24,6 +24,7 @@ from .implementations import (
     PQCacheConfig,
     PQImportance,
     PQImportanceConfig,
+    PQMaskerConfig,
     SinkMasker,
     SinkMaskerConfig,
 )
@@ -49,6 +50,7 @@ __all__ = [
     "OracleTopKConfig",
     "OracleTopPMaskerConfig",
     "PQCacheConfig",
+    "PQMaskerConfig",
     "PQImportanceConfig",
     "HashAttentionTopKMaskerConfig",
     "DoubleSparsityTopKMaskerConfig",

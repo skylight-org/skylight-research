@@ -11,7 +11,7 @@ The AdaptiveSamplingMasker is useful for:
 """
 
 from dataclasses import dataclass, field
-from typing import Any, Dict, Union
+from typing import Any, Dict, Optional, Union
 
 import torch
 from ray import tune
@@ -20,6 +20,9 @@ from scipy.stats import norm
 from sparse_attention_hub.sparse_attention.research_attention.maskers.base import (
     MaskerConfig,
     MaskerRegistry,
+)
+from sparse_attention_hub.sparse_attention.research_attention.maskers.fixed.implementations.utils.gumbel_utils import (
+    gumbel_topk_with_inclusion,
 )
 from sparse_attention_hub.sparse_attention.utils.mask import Mask
 from sparse_attention_hub.sparse_attention.utils.mask_attention_utils import (
@@ -51,6 +54,11 @@ class AdaptiveSamplingMaskerConfig(SamplingMaskerConfig):
         local_offset: Union[int, float] representing the end offset for sampling.
             If int, must be non-negative; if float, must be in [0,1] and will be
             multiplied by the number of keys to get the actual offset.
+        importance_sampling: If True (default on this path), draw the adaptive
+            budget with Gumbel-top-k on leftover keys instead of uniform
+            sampling with replacement. Budget size still comes from (epsilon,
+            delta, base_rate_sampling).
+        temperature: Gumbel noise scale used when importance_sampling is True.
     """
 
     base_rate_sampling: Union[int, float]  # Base rate (0,1) if float
@@ -58,6 +66,8 @@ class AdaptiveSamplingMaskerConfig(SamplingMaskerConfig):
     delta: float  # Confidence bound (0,1)
     init_offset: Union[int, float]  # Start index
     local_offset: Union[int, float]  # End offset
+    importance_sampling: bool = True
+    temperature: float = 1.0
     search_space: Dict[str, Any] = field(
         default_factory=lambda: {
             "base_rate_sampling": tune.grid_search([0.01, 0.02, 0.03]),
@@ -119,6 +129,9 @@ class AdaptiveSamplingMaskerConfig(SamplingMaskerConfig):
                 f"local_offset must be int or float, got {type(self.local_offset)}"
             )
 
+        if self.temperature < 0:
+            raise ValueError(f"temperature must be >= 0, got {self.temperature}")
+
 
 @MaskerRegistry.register(AdaptiveSamplingMaskerConfig)
 class AdaptiveSamplingMasker(SamplingMasker):
@@ -144,11 +157,15 @@ class AdaptiveSamplingMasker(SamplingMasker):
     Important Notes:
         - If base_rate_sampling is set to 0, the masker returns the previous mask
           without any modification.
-        - The sampling is performed with replacement for efficiency.
-        - The masker ignores the previous mask for base sampling to avoid complex
-          index manipulation.
+        - Budget size is the original vAttention (epsilon, delta, base_rate) rule.
+        - When importance_sampling is True (default), that budget is spent with
+          Gumbel-top-k on leftover keys (positions not already taken by sink,
+          local, or top-k). Mask values are inclusion probabilities; attention
+          inverts them via apply_inv_mask.
+        - When importance_sampling is False, sampling is uniform with replacement
+          over [init_offset, seq_len - local_offset), matching the original
+          vAttention draw.
         - Merge operation adds the data in masks and clamps to 1.0.
-        - Statistical guarantees are maintained through proper error bound computation.
 
     Example:
         >>> config = AdaptiveSamplingMaskerConfig(
@@ -176,6 +193,8 @@ class AdaptiveSamplingMasker(SamplingMasker):
         self.delta = config.delta
         self.init_offset = config.init_offset
         self.local_offset = config.local_offset
+        self.importance_sampling = config.importance_sampling
+        self.temperature = config.temperature
 
         # Pre-compute delta_ppf for efficiency
         self.delta_ppf = float(norm.ppf(1 - self.delta))
@@ -301,6 +320,82 @@ class AdaptiveSamplingMasker(SamplingMasker):
 
         return budget
 
+    def _get_leftover_scores(
+        self,
+        expwts: torch.Tensor,
+        previous_mask: Mask,
+        start_idx: int,
+        end_idx: int,
+        sparse_meta_data: Dict[Any, Any],
+        kwargs: Dict[str, Any],
+    ) -> torch.Tensor:
+        """Logits over ``[start_idx, end_idx)``, with already-selected keys as -inf.
+
+        Reuses PQ scores from the preceding PQCache masker when they cover this
+        window; otherwise uses ``log(expwts)`` from the attention scores
+        AdaptiveSampling already computed for the vAttention budget.
+        """
+        sampling_range: int = end_idx - start_idx
+        scores: Optional[torch.Tensor] = None
+        layer_idx = kwargs.get("layer_idx")
+        if layer_idx is not None:
+            pq_scores = sparse_meta_data.get("pq_scores", {}).get(layer_idx)
+            pq_offset = sparse_meta_data.get("pq_score_offset", {}).get(layer_idx)
+            if pq_scores is not None and pq_offset is not None:
+                rel_start: int = start_idx - int(pq_offset)
+                rel_end: int = end_idx - int(pq_offset)
+                if rel_start >= 0 and rel_end <= pq_scores.shape[-1]:
+                    scores = pq_scores[..., rel_start:rel_end]
+
+        if scores is None:
+            scores = torch.log(
+                expwts[..., start_idx:end_idx].to(torch.float32).clamp_min(1e-20)
+            )
+
+        if scores.shape[-1] != sampling_range:
+            scores = torch.log(
+                expwts[..., start_idx:end_idx].to(torch.float32).clamp_min(1e-20)
+            )
+
+        leftover: torch.Tensor = scores.clone().to(torch.float32)
+        previous_slice: torch.Tensor = previous_mask.get_dense_mask()[
+            ..., start_idx:end_idx
+        ].to(device=leftover.device)
+        leftover[previous_slice != 0] = float("-inf")
+        return leftover
+
+    def _create_importance_sampling_mask(
+        self,
+        leftover_scores: torch.Tensor,
+        budget: torch.Tensor,
+        seq_len_keys: int,
+        start_idx: int,
+        dtype: torch.dtype,
+    ) -> Mask:
+        """Gumbel-top-k on leftover logits; mask values are inclusion probabilities."""
+        batch_size, num_heads, seq_len_queries, _ = leftover_scores.shape
+        indices, inclusion, valid = gumbel_topk_with_inclusion(
+            leftover_scores, budget, self.temperature
+        )
+        dense: torch.Tensor = torch.zeros(
+            batch_size,
+            num_heads,
+            seq_len_queries,
+            seq_len_keys,
+            device=leftover_scores.device,
+            dtype=dtype,
+        )
+        full_index: torch.Tensor = torch.where(
+            valid, indices + start_idx, torch.zeros_like(indices)
+        )
+        data: torch.Tensor = torch.where(
+            valid, inclusion.to(dtype), torch.zeros_like(inclusion, dtype=dtype)
+        )
+        dense.scatter_add_(dim=-1, index=full_index, src=data)
+        return Mask.create_mask_from_dense_mask(
+            dense.shape, dense, dtype=dtype
+        )
+
     def add_mask(
         self,
         keys: torch.Tensor,
@@ -393,16 +488,32 @@ class AdaptiveSamplingMasker(SamplingMasker):
         )
         budget = torch.clamp(budget, min=num_base_samples, max=sampling_range)
 
-        # Create adaptive sampling mask
-        sampling_probabilities = (budget / sampling_range).to(previous_mask.dtype)
-        adaptive_mask = create_sampling_mask_with_per_head_budget(
-            budgets=budget,
-            sampling_probability=sampling_probabilities,
-            seq_len_keys=seq_len_keys,
-            start_idx=start_idx,
-            end_idx=end_idx,
-            dtype=previous_mask.dtype,
-        )
+        if self.importance_sampling:
+            leftover_scores = self._get_leftover_scores(
+                expwts,
+                previous_mask,
+                start_idx,
+                end_idx,
+                sparse_meta_data,
+                kwargs,
+            )
+            adaptive_mask = self._create_importance_sampling_mask(
+                leftover_scores,
+                budget,
+                seq_len_keys,
+                start_idx,
+                previous_mask.dtype,
+            )
+        else:
+            sampling_probabilities = (budget / sampling_range).to(previous_mask.dtype)
+            adaptive_mask = create_sampling_mask_with_per_head_budget(
+                budgets=budget,
+                sampling_probability=sampling_probabilities,
+                seq_len_keys=seq_len_keys,
+                start_idx=start_idx,
+                end_idx=end_idx,
+                dtype=previous_mask.dtype,
+            )
         # Merge masks
         return previous_mask.merge_mask(adaptive_mask, inplace=False)
 
