@@ -99,14 +99,14 @@ class TestGumbelNoise:
         assert abs(float(noise.mean()) - 0.5772) < 0.02
         assert abs(float(noise.std()) - 1.2825) < 0.02
 
-    def test_noise_keeps_score_dtype(self):
+    def test_noise_is_float32(self):
         from sparse_attention_hub.sparse_attention.research_attention.maskers.fixed.implementations.pq_importance import (
             _sample_gumbel_noise,
         )
 
         scores = torch.zeros(4, 8, dtype=torch.float16)
         noise = _sample_gumbel_noise(scores)
-        assert noise.dtype == torch.float16
+        assert noise.dtype == torch.float32
         assert noise.shape == scores.shape
         assert torch.isfinite(noise).all()
 
@@ -161,7 +161,7 @@ class TestPQImportanceMask:
             layer_idx=0,
         )
 
-    def test_mask_is_binary_and_within_budget(self):
+    def test_mask_is_weighted_and_within_budget(self):
         from sparse_attention_hub.sparse_attention.research_attention.maskers.fixed.implementations import (
             PQImportance,
             PQImportanceConfig,
@@ -174,8 +174,9 @@ class TestPQImportanceMask:
         ).get_dense_mask()
 
         active = dense > 0
-        # selection is a plain top-k mask; only the ranking is randomised
-        assert set(dense.unique().tolist()) == {0.0, 1.0}
+        # Horvitz-Thompson: 1 / pi_i, so selected entries are in [1, 1/min_pi]
+        selected = dense[active]
+        assert bool((selected >= 1.0).all())
         assert bool((active.sum(dim=-1) == 32).all())
         # nothing is selected inside the sink (init_offset) region
         assert not bool(active[:, :, :, :8].any())
