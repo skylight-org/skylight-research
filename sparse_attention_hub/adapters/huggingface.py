@@ -141,7 +141,17 @@ class ModelAdapterHF(ModelAdapter):
             context, questions, answer_prefix
         )
 
-        context_tokens = self.tokenizer.encode(context, return_tensors="pt")
+        # `_preprocess_context_and_questions` may have already applied the chat
+        # template, which emits the model's BOS itself. Several fast tokenizers
+        # (Llama-3.x, Gemma) carry a `TemplateProcessing` post-processor that
+        # prepends BOS on *every* `encode()` regardless of `add_bos_token`, so
+        # letting `add_special_tokens` default to True duplicates it here and
+        # splices a third one in mid-sequence at the question boundary below.
+        context_tokens = self.tokenizer.encode(
+            context,
+            return_tensors="pt",
+            add_special_tokens=self.tokenizer.chat_template is None,
+        )
         context_tokens = context_tokens[
             :, :max_context_length
         ]  # truncate context to max_context_length
@@ -159,7 +169,11 @@ class ModelAdapterHF(ModelAdapter):
             for question in questions:
                 sparse_meta_data: Dict[str, Any] = {}
 
-                question_tokens = self.tokenizer.encode(question, return_tensors="pt")
+                # The question continues the already-BOS-prefixed context; any
+                # special token added here lands mid-sequence.
+                question_tokens = self.tokenizer.encode(
+                    question, return_tensors="pt", add_special_tokens=False
+                )
                 if input_device is not None:
                     question_tokens = question_tokens.to(input_device)
 
