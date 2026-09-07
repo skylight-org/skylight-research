@@ -186,7 +186,8 @@ class TestProcessRequestSpecialTokens:
         assert len(calls) == 2, f"expected one context and one question encode: {calls}"
         assert calls[0].add_special_tokens is False, (
             "context encode must suppress special tokens when the chat template "
-            f"already emitted BOS; got {calls[0]!r}"
+            "already emitted BOS; got "
+            f"{calls[0]!r}"
         )
         assert calls[1].add_special_tokens is False, (
             "question encode must never add special tokens mid-sequence; got "
@@ -215,7 +216,8 @@ class TestProcessRequestSpecialTokens:
         assert len(calls) == 2, f"expected one context and one question encode: {calls}"
         assert calls[0].add_special_tokens is True, (
             "context encode must request special tokens when no chat template "
-            f"rendered a BOS; got {calls[0]!r}"
+            "rendered a BOS; got "
+            f"{calls[0]!r}"
         )
         assert calls[1].add_special_tokens is False, (
             "question encode must never add special tokens mid-sequence; got "
