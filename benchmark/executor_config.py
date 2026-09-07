@@ -4,6 +4,8 @@ This module provides configuration dataclasses and factory functions for orchest
 parallel benchmark execution across multiple GPUs using multiprocessing.
 """
 
+import hashlib
+import json
 import logging
 import os
 from dataclasses import dataclass, field
@@ -366,6 +368,15 @@ def generate_benchmark_stubs(
         generation_kwargs = {}
     if request_kwargs is None:
         request_kwargs = {}
+
+    # Match the adapter's revision overrides and isolate resumable checkpoint results.
+    revisions = (
+        (adapter_config.model_kwargs or {}).get("revision", adapter_config.revision),
+        (adapter_config.tokenizer_kwargs or {}).get("revision", adapter_config.revision),
+    )
+    if any(revision is not None for revision in revisions):
+        revision_key = hashlib.sha256(json.dumps(revisions).encode()).hexdigest()[:16]
+        base_result_dir = os.path.join(base_result_dir, f"revision-{revision_key}")
         
     stubs: List[BenchmarkStub] = []
     
