@@ -696,7 +696,7 @@ class TestImportanceSamplingEstimator:
         assert bool(torch.isinf(leftover[..., 256:]).all())
         assert bool(torch.isfinite(leftover[..., :256]).all())
 
-    def test_pq_proposal_is_rescaled_onto_the_attention_logit_axis(self):
+    def test_published_proposal_is_rescaled_onto_the_attention_logit_axis(self):
         """PQCache publishes raw q.k; the proposal must be scaling * q.k.
 
         Without this, temperature=1.0 means temperature=1/sqrt(head_dim) in
@@ -704,7 +704,7 @@ class TestImportanceSamplingEstimator:
         """
         masker = self._masker("gumbel")
         pq_scores = torch.randn(self.SHAPE) * 30.0
-        meta = {"pq_scores": {0: pq_scores}, "pq_score_offset": {0: 0}}
+        meta = {"heavy_scores": {0: pq_scores}, "heavy_score_offset": {0: 0}}
         expwts = torch.rand(self.SHAPE) + 0.1
         empty = Mask.create_empty_mask(
             self.SHAPE, dtype=torch.float32, device=torch.device("cpu")
@@ -715,11 +715,11 @@ class TestImportanceSamplingEstimator:
         )
         assert torch.allclose(leftover, pq_scores * scaling, atol=1e-5)
 
-    def test_stale_pq_scores_from_another_step_are_not_reused(self):
+    def test_stale_published_scores_from_another_step_are_not_reused(self):
         """The cache is keyed only by layer, so the leading dims must be checked."""
         masker = self._masker("gumbel")
         stale = torch.randn(1, 2, 8, self.SHAPE[-1])  # a prefill entry, q=8
-        meta = {"pq_scores": {0: stale}, "pq_score_offset": {0: 0}}
+        meta = {"heavy_scores": {0: stale}, "heavy_score_offset": {0: 0}}
         expwts = torch.rand(self.SHAPE) + 0.1  # decode, q=1
         empty = Mask.create_empty_mask(
             self.SHAPE, dtype=torch.float32, device=torch.device("cpu")
@@ -806,7 +806,6 @@ class TestSamplingModeConfig:
     def test_rejects_negative_temperature(self):
         with pytest.raises(ValueError, match="temperature must be >= 0"):
             self._config(temperature=-1.0)
-
 
 
 @pytest.mark.unit

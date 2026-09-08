@@ -144,9 +144,7 @@ class PQCache(TopKMasker):
         # Optional: offer these to a later sampling masker as proposal logits.
         # Nothing requires it -- a heavy masker that does not publish just gets
         # AdaptiveSampling's exact log(expwts) fallback instead.
-        self.publish_heavy_scores(
-            sparse_meta_data, layer_idx, scores, self.init_offset
-        )
+        self.publish_heavy_scores(sparse_meta_data, layer_idx, scores, self.init_offset)
 
         # Phase 5: Create mask from scores
         pq_mask: Mask = self._create_pq_mask(
