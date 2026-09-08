@@ -141,13 +141,12 @@ class PQCache(TopKMasker):
             queries, keys, centroids, codebook
         )
 
-        # Published so a later masker (AdaptiveSampling in an importance-sampling
-        # mode) can reuse these as proposal logits instead of recomputing q.k.
-        # Only the CURRENT layer is retained: these are [b, h, q, n_clustered],
-        # ~8 GB across 32 layers at the question step for an 8B model at 32k,
-        # and no consumer ever reads another layer's entry.
-        sparse_meta_data["pq_scores"] = {layer_idx: scores}
-        sparse_meta_data["pq_score_offset"] = {layer_idx: self.init_offset}
+        # Optional: offer these to a later sampling masker as proposal logits.
+        # Nothing requires it -- a heavy masker that does not publish just gets
+        # AdaptiveSampling's exact log(expwts) fallback instead.
+        self.publish_heavy_scores(
+            sparse_meta_data, layer_idx, scores, self.init_offset
+        )
 
         # Phase 5: Create mask from scores
         pq_mask: Mask = self._create_pq_mask(

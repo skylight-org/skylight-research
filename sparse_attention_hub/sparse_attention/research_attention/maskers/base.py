@@ -125,6 +125,35 @@ class ResearchMasker(ABC):
         )
         return Mask.create_full_mask(mask_shape, dtype=dtype, device=device)
 
+    @staticmethod
+    def publish_heavy_scores(
+        sparse_meta_data: Dict[Any, Any],
+        layer_idx: int,
+        scores: torch.Tensor,
+        init_offset: int,
+    ) -> None:
+        """Offer this masker's per-key scores to a later sampling masker.
+
+        Entirely optional. ``AdaptiveSamplingMasker`` in an importance-sampling
+        mode will reuse these as its proposal logits when they cover its window,
+        instead of falling back to the exact ``log(expwts)`` it computes anyway;
+        a heavy masker that does not publish simply gets the exact fallback.
+
+        Args:
+            sparse_meta_data: the per-request metadata dict.
+            layer_idx: the layer these scores belong to.
+            scores: ``[batch, num_query_heads, seq_len_queries, n_scored]``
+                RAW scores, on whatever axis the masker natively produces --
+                the consumer rescales onto the attention-logit axis.
+            init_offset: key index that column 0 of ``scores`` corresponds to.
+
+        Only the current layer is retained: these tensors are large (~8 GB
+        across 32 layers at the question step for an 8B model at 32k) and no
+        consumer ever reads another layer's entry.
+        """
+        sparse_meta_data["heavy_scores"] = {layer_idx: scores}
+        sparse_meta_data["heavy_score_offset"] = {layer_idx: init_offset}
+
     def _create_mask_from_rowise_indices(
         self,
         dims: AttentionTensorDimensions,

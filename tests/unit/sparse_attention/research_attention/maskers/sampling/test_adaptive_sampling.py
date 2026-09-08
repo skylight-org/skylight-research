@@ -806,3 +806,149 @@ class TestSamplingModeConfig:
     def test_rejects_negative_temperature(self):
         with pytest.raises(ValueError, match="temperature must be >= 0"):
             self._config(temperature=-1.0)
+
+
+
+@pytest.mark.unit
+class TestImportanceSamplingIsHeavyMaskerAgnostic:
+    """The sampling stage must not care which heavy masker preceded it.
+
+    PQCache publishes its scores and they get reused as the proposal; every
+    other heavy masker publishes nothing and the exact log(expwts) fallback
+    takes over. Both must produce a valid mask, and neither may re-select a key
+    the heavy stage already took.
+    """
+
+    HEAD_DIM = 32
+    SHAPE = (1, 4, 1, 256)
+
+    def _tensors(self):
+        torch.manual_seed(17)
+        batch, heads, queries, keys_len = self.SHAPE
+        return (
+            torch.randn(batch, heads, keys_len, self.HEAD_DIM),
+            torch.randn(batch, heads, queries, self.HEAD_DIM),
+            torch.randn(batch, heads, keys_len, self.HEAD_DIM),
+        )
+
+    def _heavy_masker(self, name):
+        from sparse_attention_hub.sparse_attention.research_attention.maskers.fixed.implementations import (  # noqa: E501
+            OracleTopK,
+            OracleTopKConfig,
+            PQCache,
+            PQCacheConfig,
+        )
+
+        if name == "oracle":
+            return OracleTopK(OracleTopKConfig(heavy_size=16))
+        return PQCache(
+            PQCacheConfig(
+                heavy_size=16,
+                pq_group_factor=2,
+                pq_bits=4,
+                kmeans_iter=2,
+                init_offset=8,
+                metric="euclidean",
+            )
+        )
+
+    @pytest.mark.parametrize("heavy", ["oracle", "pqcache"])
+    @pytest.mark.parametrize("mode", ["gumbel", "multinomial"])
+    def test_runs_behind_any_heavy_masker(self, heavy, mode):
+        from sparse_attention_hub.sparse_attention.research_attention.maskers.fixed.implementations import (  # noqa: E501
+            LocalMasker,
+            LocalMaskerConfig,
+            SinkMasker,
+            SinkMaskerConfig,
+        )
+
+        keys, queries, values = self._tensors()
+        chain = [
+            SinkMasker(SinkMaskerConfig(sink_size=8)),
+            LocalMasker(LocalMaskerConfig(window_size=8)),
+            self._heavy_masker(heavy),
+            AdaptiveSamplingMasker(
+                AdaptiveSamplingMaskerConfig(
+                    base_rate_sampling=0.05,
+                    epsilon=0.2,
+                    delta=0.2,
+                    init_offset=8,
+                    local_offset=8,
+                    sampling_mode=mode,
+                    temperature=1.0,
+                )
+            ),
+        ]
+        meta: dict = {}
+        mask = Mask.create_empty_mask(
+            self.SHAPE, dtype=torch.float32, device=torch.device("cpu")
+        )
+        heavy_dense = None
+        for masker in chain:
+            mask = masker.add_mask(
+                keys=keys,
+                queries=queries,
+                values=values,
+                attention_mask=None,
+                scaling=self.HEAD_DIM**-0.5,
+                dropout=0.0,
+                sparse_meta_data=meta,
+                previous_mask=mask,
+                layer_idx=0,
+            )
+            if masker is chain[2]:
+                heavy_dense = mask.get_dense_mask().clone()
+
+        dense = mask.get_dense_mask()
+        assert dense.shape == self.SHAPE
+        assert bool(torch.isfinite(dense).all())
+        # the heavy stage's picks are untouched, and the sampler adds new keys
+        # at a fractional inclusion probability rather than re-picking them
+        assert bool((dense[heavy_dense > 0] == 1.0).all())
+        fresh = (heavy_dense == 0) & (dense > 0)
+        assert bool(fresh.any()), f"{heavy}/{mode} sampled nothing"
+        assert bool((dense[fresh] > 0).all()) and bool((dense[fresh] <= 1.0).all())
+
+        # PQCache offers its scores; OracleTopK offers none and takes the
+        # exact log(expwts) fallback. Both must work.
+        assert ("heavy_scores" in meta) == (heavy == "pqcache")
+
+    def test_works_with_no_heavy_masker_at_all(self):
+        """Sink + Local + AdaptiveSampling, nothing to reuse."""
+        from sparse_attention_hub.sparse_attention.research_attention.maskers.fixed.implementations import (  # noqa: E501
+            SinkMasker,
+            SinkMaskerConfig,
+        )
+
+        keys, queries, values = self._tensors()
+        mask = Mask.create_empty_mask(
+            self.SHAPE, dtype=torch.float32, device=torch.device("cpu")
+        )
+        meta: dict = {}
+        for masker in (
+            SinkMasker(SinkMaskerConfig(sink_size=8)),
+            AdaptiveSamplingMasker(
+                AdaptiveSamplingMaskerConfig(
+                    base_rate_sampling=0.05,
+                    epsilon=0.2,
+                    delta=0.2,
+                    init_offset=8,
+                    local_offset=8,
+                    sampling_mode="multinomial",
+                )
+            ),
+        ):
+            mask = masker.add_mask(
+                keys=keys,
+                queries=queries,
+                values=values,
+                attention_mask=None,
+                scaling=self.HEAD_DIM**-0.5,
+                dropout=0.0,
+                sparse_meta_data=meta,
+                previous_mask=mask,
+                layer_idx=0,
+            )
+        dense = mask.get_dense_mask()
+        assert "heavy_scores" not in meta
+        assert bool((dense > 0).any()) and bool((dense <= 1.0).all())

@@ -366,27 +366,32 @@ class AdaptiveSamplingMasker(SamplingMasker):
     ) -> torch.Tensor:
         """Proposal logits over ``[start_idx, end_idx)``, already-taken keys -inf.
 
-        Reuses the scores a preceding heavy masker published in
-        ``sparse_meta_data["pq_scores"]`` when they cover this window, so the
-        sampling stage does not recompute ``q . k``; otherwise falls back to
-        ``log(expwts)``, the attention scores this masker already computed for
-        the vAttention budget.
+        The heavy masker in front of this one is irrelevant to the mechanism.
+        Two proposal sources, tried in order:
 
-        Both sources come back on the TRUE ATTENTION-LOGIT axis, so
-        ``temperature`` means the same thing whichever one fires. PQCache
-        publishes raw ``q . k_hat``, while the attention logit is
-        ``scaling * q . k`` -- and ``scaling = 1/sqrt(head_dim) = 0.088`` for a
-        128-dim head. Sampling the unscaled score at ``temperature=1`` is
-        sampling the real logit at ``temperature=0.088``, which collapses the
-        draw onto the deterministic top-k.
+        1. Whatever a preceding masker offered through
+           ``ResearchMasker.publish_heavy_scores`` (PQCache does; nothing is
+           required to), when it covers this window.
+        2. Otherwise ``log(expwts)`` -- the exact attention logits this masker
+           already computed for the vAttention budget, so the fallback costs
+           nothing extra and works behind ANY heavy masker (OracleTopK, Quest,
+           HashAttention, DoubleSparsity, Socket, or no heavy masker at all).
+
+        Both come back on the TRUE ATTENTION-LOGIT axis, so ``temperature``
+        means the same thing whichever fires. PQCache publishes raw
+        ``q . k_hat``, while the attention logit is ``scaling * q . k`` -- and
+        ``scaling = 1/sqrt(head_dim) = 0.088`` for a 128-dim head. Sampling the
+        unscaled score at ``temperature=1`` is sampling the real logit at
+        ``temperature=0.088``, which collapses the draw onto the deterministic
+        top-k.
         """
         window: torch.Tensor = expwts[..., start_idx:end_idx]
         sampling_range: int = end_idx - start_idx
         scores: Optional[torch.Tensor] = None
         layer_idx = kwargs.get("layer_idx")
         if layer_idx is not None:
-            published = sparse_meta_data.get("pq_scores", {}).get(layer_idx)
-            offset = sparse_meta_data.get("pq_score_offset", {}).get(layer_idx)
+            published = sparse_meta_data.get("heavy_scores", {}).get(layer_idx)
+            offset = sparse_meta_data.get("heavy_score_offset", {}).get(layer_idx)
             if published is not None and offset is not None:
                 rel_start: int = start_idx - int(offset)
                 rel_end: int = end_idx - int(offset)
