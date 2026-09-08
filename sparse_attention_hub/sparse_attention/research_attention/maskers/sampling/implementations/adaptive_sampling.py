@@ -208,6 +208,27 @@ class AdaptiveSamplingMasker(SamplingMasker):
         ... )
         >>> masker = AdaptiveSamplingMasker(config)
         >>> # Use masker.add_mask() to apply adaptive sampling to attention masks
+
+        vAttention++ is the same chain with one field changed. The heavy masker
+        is whatever you want it to be -- swap PQCacheConfig for OracleTopKConfig,
+        QuestTopKMaskerConfig, HashAttentionTopKMaskerConfig, ... and nothing
+        else moves:
+
+        >>> ResearchAttentionConfig(masker_configs=[
+        ...     SinkMaskerConfig(sink_size=128),
+        ...     LocalMaskerConfig(window_size=127),
+        ...     PQCacheConfig(heavy_size=0.008, pq_group_factor=16, pq_bits=8,
+        ...                   kmeans_iter=10, init_offset=128, metric="euclidean"),
+        ...     AdaptiveSamplingMaskerConfig(
+        ...         base_rate_sampling=0.002, epsilon=0.1, delta=0.1,
+        ...         init_offset=128, local_offset=127,
+        ...         sampling_mode="multinomial",  # or "gumbel"; "uniform" is vAttention
+        ...         temperature=1.0,
+        ...     ),
+        ... ])
+
+        `init_offset` / `local_offset` should match the sink and local sizes, so
+        the sampler's window is exactly the region neither of them covers.
     """
 
     def __init__(self, config: AdaptiveSamplingMaskerConfig) -> None:
