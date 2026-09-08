@@ -1,0 +1,35 @@
+here are some example context/question pairs to test chats with! you may also ask questions without context
+
+
+
+1. Reading Comprehension & Inference
+
+Context:
+A company rolled out a new expense policy allowing remote employees to reimburse home office equipment. The policy applies only to full-time staff and has a yearly cap of $1,000. Contractors are explicitly excluded. Reimbursements must be submitted within 60 days of purchase.
+
+Question:
+Can a part-time remote employee submit a reimbursement for a monitor purchased three months ago?
+
+2. Logical Reasoning
+
+Context:
+All servers in Data Center A are backed up nightly. Some servers in Data Center B are also backed up nightly. No server is backed up more than once per day.
+
+Question:
+Is it possible for a server in Data Center B to go two days without a backup?
+
+3. Summarization & Prioritization
+
+Context:
+The product launch was delayed due to a critical security bug. Marketing assets are ready, but the engineering team needs two more weeks to fix the issue. Customer support has already received inquiries about the release date.
+
+Question:
+What is the most important reason to delay the launch?
+
+4. Ambiguity Handling
+
+Context:
+Alex told Jordan that the report was finished before the meeting. Afterward, Jordan emailed the team saying the report still needed revisions. The meeting notes do not clarify who was responsible for the final edits.
+
+Question:
+Who likely believed the report was incomplete, and why?

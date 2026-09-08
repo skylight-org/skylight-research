@@ -5,6 +5,9 @@ matplotlib>=3.5.0
 seaborn>=0.11.0
 datasets>=2.0.0
 transformers>=4.20.0
+flask
+requests
+accelerate
 
 # Development dependencies
 pytest>=7.0.0
