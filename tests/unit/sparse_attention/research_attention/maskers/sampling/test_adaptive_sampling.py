@@ -549,3 +549,260 @@ class TestAdaptiveSamplingMasker:
         dense_mask = result.get_dense_mask()
         assert torch.all(torch.isfinite(dense_mask))
         assert not torch.any(torch.isnan(dense_mask))
+
+
+@pytest.mark.unit
+class TestImportanceSamplingEstimator:
+    """The property the sampling modes exist for: an unbiased leftover estimate.
+
+    Every assertion here is on the ESTIMATOR, not on shapes. Each one fails if
+    the mask stores 1/pi instead of pi, if the proposal is left on the raw
+    (unscaled) PQ axis, or if a repeated multinomial draw is counted twice.
+    """
+
+    SHAPE = (1, 2, 1, 512)
+    START, END = 0, 512
+
+    def _leftover_logits(self, spread: float, seed: int) -> torch.Tensor:
+        generator = torch.Generator().manual_seed(seed)
+        return (
+            torch.randn(self.SHAPE, generator=generator, dtype=torch.float32) * spread
+        )
+
+    def _masker(self, mode: str, temperature: float = 1.0):
+        return AdaptiveSamplingMasker(
+            AdaptiveSamplingMaskerConfig(
+                base_rate_sampling=0.1,
+                epsilon=0.1,
+                delta=0.1,
+                init_offset=0,
+                local_offset=0,
+                sampling_mode=mode,
+                temperature=temperature,
+            )
+        )
+
+    def _estimate(self, masker, logits, budget, trials):
+        """Mean and sd of sum_{i in S} x_i / pi_i, as the attention path computes it."""
+        x = torch.exp(logits - logits.max())
+        budget_tensor = torch.full((*self.SHAPE[:-1], 1), budget, dtype=torch.long)
+        estimates = []
+        for trial in range(trials):
+            torch.manual_seed(9000 + trial)
+            mask = masker._create_importance_sampling_mask(
+                logits, budget_tensor, self.SHAPE[-1], self.START, torch.float32
+            )
+            # apply_inv_mask is what turns the stored pi_i into the 1/pi_i weight
+            estimates.append(float(mask.apply_inv_mask(x).sum()))
+        stacked = torch.tensor(estimates)
+        return float(stacked.mean()), float(stacked.std()), float(x.sum())
+
+    @pytest.mark.parametrize("mode", ["gumbel", "multinomial"])
+    def test_horvitz_thompson_estimator_is_unbiased(self, mode):
+        """The whole point: E[sum x_i / pi_i] must equal sum x_i.
+
+        With data = 1/pi the estimator collapses toward zero, and with the
+        merge clamp on top it saturates at the truncated sum -- either way this
+        is off by tens of percent, far outside the tolerance below.
+        """
+        logits = self._leftover_logits(spread=3.0, seed=11)
+        mean, sd, truth = self._estimate(self._masker(mode), logits, 64, trials=120)
+        relative_bias = (mean - truth) / truth
+        standard_error = sd / (120**0.5) / truth
+        assert abs(relative_bias) < max(0.05, 3 * standard_error), (
+            f"{mode}: relative bias {relative_bias:+.3%} "
+            f"(truth {truth:.3f}, mean {mean:.3f}, 1 s.e. {standard_error:.3%})"
+        )
+
+    @pytest.mark.parametrize("mode", ["gumbel", "multinomial"])
+    def test_importance_sampling_beats_uniform_variance(self, mode):
+        """Importance sampling is only worth its cost if it cuts the variance."""
+        logits = self._leftover_logits(spread=3.0, seed=12)
+        _, sd_importance, truth = self._estimate(
+            self._masker(mode), logits, 64, trials=120
+        )
+        x = torch.exp(logits - logits.max())
+        n = self.SHAPE[-1]
+        uniform_estimates = []
+        for trial in range(120):
+            generator = torch.Generator().manual_seed(9000 + trial)
+            drawn = torch.randint(0, n, (64,), generator=generator)
+            uniform_estimates.append(
+                float(x[..., torch.unique(drawn)].sum() / (64 / n))
+            )
+        sd_uniform = float(torch.tensor(uniform_estimates).std())
+        assert sd_importance < 0.5 * sd_uniform, (
+            f"{mode}: sd {sd_importance / truth:.2%} of truth vs uniform "
+            f"{sd_uniform / truth:.2%}"
+        )
+
+    def test_mask_stores_inclusion_probability_not_its_reciprocal(self):
+        """data must be pi_i in (0, 1]; apply_inv_mask is what makes it 1/pi_i.
+
+        Storing 1/pi_i would (a) invert the correction and (b) be erased by
+        merge_mask's clamp(m1 + m2, 0, 1), since every such value is >= 1.
+        """
+        logits = self._leftover_logits(spread=3.0, seed=13)
+        budget_tensor = torch.full((*self.SHAPE[:-1], 1), 64, dtype=torch.long)
+        for mode in ("gumbel", "multinomial"):
+            torch.manual_seed(3)
+            mask = self._masker(mode)._create_importance_sampling_mask(
+                logits, budget_tensor, self.SHAPE[-1], self.START, torch.float32
+            )
+            dense = mask.get_dense_mask()
+            selected = dense[dense > 0]
+            assert selected.numel() > 0
+            assert bool((selected > 0).all()) and bool((selected <= 1.0).all())
+            assert bool((selected < 1.0).any()), f"{mode} produced a hard top-k"
+            weights = mask.apply_inv_mask(torch.ones_like(dense))[dense > 0]
+            assert bool((weights >= 1.0 - 1e-3).all()), "weights must up-weight"
+            # and the clamp in merge_mask must leave them alone
+            other = torch.zeros_like(dense)
+            other[..., :4] = 1.0
+            merged = Mask.create_mask_from_dense_mask(
+                dense.shape, other, dtype=torch.float32
+            ).merge_mask(mask, inplace=False)
+            survived = merged.get_dense_mask()[..., 4:][dense[..., 4:] > 0]
+            assert torch.allclose(survived, selected[-survived.numel() :], atol=1e-6)
+
+    def test_multinomial_duplicate_draws_are_not_double_counted(self):
+        """With replacement, one key can be drawn many times; pi_i applies once."""
+        logits = torch.full(self.SHAPE, -20.0)
+        logits[..., 7] = 20.0  # essentially all mass on a single key
+        budget_tensor = torch.full((*self.SHAPE[:-1], 1), 32, dtype=torch.long)
+        torch.manual_seed(5)
+        mask = self._masker("multinomial")._create_importance_sampling_mask(
+            logits, budget_tensor, self.SHAPE[-1], self.START, torch.float32
+        )
+        dense = mask.get_dense_mask()
+        assert float(dense[..., 7].max()) <= 1.0
+        assert float(dense[..., 7].min()) > 0.0
+
+    def test_causally_masked_keys_are_never_sampled(self):
+        """expwts == 0 (attention-masked) must be -inf in the proposal.
+
+        log(clamp_min(1e-20)) floors those at a FINITE -46, which every
+        isfinite() liveness test would happily sample.
+        """
+        masker = self._masker("gumbel")
+        expwts = torch.rand(self.SHAPE) + 0.1
+        expwts[..., 256:] = 0.0
+        empty = Mask.create_empty_mask(
+            self.SHAPE, dtype=torch.float32, device=torch.device("cpu")
+        )
+        leftover = masker._get_leftover_scores(
+            expwts, empty, 0, self.SHAPE[-1], {}, {}, 1.0
+        )
+        assert bool(torch.isinf(leftover[..., 256:]).all())
+        assert bool(torch.isfinite(leftover[..., :256]).all())
+
+    def test_pq_proposal_is_rescaled_onto_the_attention_logit_axis(self):
+        """PQCache publishes raw q.k; the proposal must be scaling * q.k.
+
+        Without this, temperature=1.0 means temperature=1/sqrt(head_dim) in
+        attention space and the draw collapses onto the deterministic top-k.
+        """
+        masker = self._masker("gumbel")
+        pq_scores = torch.randn(self.SHAPE) * 30.0
+        meta = {"pq_scores": {0: pq_scores}, "pq_score_offset": {0: 0}}
+        expwts = torch.rand(self.SHAPE) + 0.1
+        empty = Mask.create_empty_mask(
+            self.SHAPE, dtype=torch.float32, device=torch.device("cpu")
+        )
+        scaling = 0.0884
+        leftover = masker._get_leftover_scores(
+            expwts, empty, 0, self.SHAPE[-1], meta, {"layer_idx": 0}, scaling
+        )
+        assert torch.allclose(leftover, pq_scores * scaling, atol=1e-5)
+
+    def test_stale_pq_scores_from_another_step_are_not_reused(self):
+        """The cache is keyed only by layer, so the leading dims must be checked."""
+        masker = self._masker("gumbel")
+        stale = torch.randn(1, 2, 8, self.SHAPE[-1])  # a prefill entry, q=8
+        meta = {"pq_scores": {0: stale}, "pq_score_offset": {0: 0}}
+        expwts = torch.rand(self.SHAPE) + 0.1  # decode, q=1
+        empty = Mask.create_empty_mask(
+            self.SHAPE, dtype=torch.float32, device=torch.device("cpu")
+        )
+        leftover = masker._get_leftover_scores(
+            expwts, empty, 0, self.SHAPE[-1], meta, {"layer_idx": 0}, 1.0
+        )
+        assert leftover.shape == self.SHAPE
+        assert torch.allclose(leftover, torch.log(expwts.clamp_min(1e-20)), atol=1e-5)
+
+    def test_grouped_query_attention_shapes(self):
+        """Llama-3.1-8B is 32 query heads over 8 KV heads; the mask is query-head."""
+        num_q_heads, num_kv_heads, head_dim = 8, 2, 16
+        seq_len_keys, seq_len_queries = 64, 1
+        keys = torch.randn(1, num_kv_heads, seq_len_keys, head_dim)
+        queries = torch.randn(1, num_q_heads, seq_len_queries, head_dim)
+        values = torch.randn(1, num_kv_heads, seq_len_keys, head_dim)
+        previous = torch.zeros(1, num_q_heads, seq_len_queries, seq_len_keys)
+        previous[..., :8] = 1.0
+        previous_mask = Mask.create_mask_from_dense_mask(
+            previous.shape, previous, dtype=torch.float32
+        )
+        for mode in ("uniform", "gumbel", "multinomial"):
+            result = self._masker(mode).add_mask(
+                keys,
+                queries,
+                values,
+                None,
+                scaling=head_dim**-0.5,
+                dropout=0.0,
+                sparse_meta_data={},
+                previous_mask=previous_mask,
+                layer_idx=0,
+            )
+            assert result.get_dense_mask().shape == previous.shape
+
+    def test_one_saturated_row_does_not_erase_other_rows_weights(self):
+        """A whole-tensor -inf threshold would set pi = 1 everywhere."""
+        from sparse_attention_hub.sparse_attention.research_attention.maskers.sampling.implementations.utils.importance_sampling_utils import (  # noqa: E501
+            gumbel_topk_with_inclusion,
+        )
+
+        n = 16
+        scores = torch.randn(1, 1, 2, n) * 3.0
+        budget = torch.tensor([[[[n], [4]]]]).reshape(1, 1, 2, 1)
+        torch.manual_seed(2)
+        _, inclusion, valid, _dense = gumbel_topk_with_inclusion(scores, budget, 1.0)
+        saturated = inclusion[0, 0, 0][valid[0, 0, 0]]
+        sampled = inclusion[0, 0, 1][valid[0, 0, 1]]
+        assert bool((saturated == 1.0).all()), "a saturated row is a census"
+        assert bool((sampled < 1.0).any()), "the other row must keep real weights"
+
+
+@pytest.mark.unit
+class TestSamplingModeConfig:
+    """The flag itself."""
+
+    def _config(self, **overrides):
+        base = dict(
+            base_rate_sampling=0.1,
+            epsilon=0.1,
+            delta=0.1,
+            init_offset=0,
+            local_offset=0,
+        )
+        base.update(overrides)
+        return AdaptiveSamplingMaskerConfig(**base)
+
+    def test_default_is_uniform(self):
+        assert self._config().sampling_mode == "uniform"
+
+    @pytest.mark.parametrize("mode", ["uniform", "gumbel", "multinomial"])
+    def test_accepts_every_documented_mode(self, mode):
+        assert self._config(sampling_mode=mode).sampling_mode == mode
+
+    def test_rejects_unknown_mode(self):
+        with pytest.raises(ValueError, match="sampling_mode must be one of"):
+            self._config(sampling_mode="importance")
+
+    def test_rejects_zero_temperature_for_importance_modes(self):
+        with pytest.raises(ValueError, match="deterministic top-k"):
+            self._config(sampling_mode="gumbel", temperature=0.0)
+
+    def test_rejects_negative_temperature(self):
+        with pytest.raises(ValueError, match="temperature must be >= 0"):
+            self._config(temperature=-1.0)

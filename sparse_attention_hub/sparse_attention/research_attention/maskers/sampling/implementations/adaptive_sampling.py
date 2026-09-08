@@ -11,7 +11,7 @@ The AdaptiveSamplingMasker is useful for:
 """
 
 from dataclasses import dataclass, field
-from typing import Any, Dict, Union
+from typing import Any, Dict, Optional, Union
 
 import torch
 from ray import tune
@@ -20,6 +20,11 @@ from scipy.stats import norm
 from sparse_attention_hub.sparse_attention.research_attention.maskers.base import (
     MaskerConfig,
     MaskerRegistry,
+)
+from sparse_attention_hub.sparse_attention.research_attention.maskers.sampling.implementations.utils.importance_sampling_utils import (
+    SAMPLING_MODES,
+    gumbel_topk_with_inclusion,
+    multinomial_with_inclusion,
 )
 from sparse_attention_hub.sparse_attention.utils.mask import Mask
 from sparse_attention_hub.sparse_attention.utils.mask_attention_utils import (
@@ -51,6 +56,26 @@ class AdaptiveSamplingMaskerConfig(SamplingMaskerConfig):
         local_offset: Union[int, float] representing the end offset for sampling.
             If int, must be non-negative; if float, must be in [0,1] and will be
             multiplied by the number of keys to get the actual offset.
+        sampling_mode: How the adaptive budget is SPENT. The budget SIZE is the
+            original vAttention (epsilon, delta, base_rate_sampling) rule in
+            every mode; only the draw changes.
+
+            * ``"uniform"`` (default): the published vAttention draw -- uniform
+              with replacement over ``[init_offset, seq_len - local_offset)``.
+            * ``"multinomial"``: exact importance sampling. ``budget`` i.i.d.
+              draws from ``softmax(logits / temperature)`` over the leftover
+              keys, weighted by the exact inclusion probability
+              ``1 - (1 - p_i) ** budget``.
+            * ``"gumbel"``: the Gumbel-top-k approximation of the same draw --
+              one ``topk`` over ``logits + temperature * Gumbel(0, 1)``,
+              weighted by ``1 - exp(-exp((l_i - kappa) / temperature))``.
+
+            The default stays ``"uniform"`` so every existing vAttention config
+            keeps the behaviour it was tuned and published with.
+        temperature: Sampling temperature, in TRUE ATTENTION-LOGIT units. The
+            proposal is rescaled onto that axis before the draw, so
+            ``temperature=1.0`` samples each key with probability rising in
+            proportion to its attention weight.
     """
 
     base_rate_sampling: Union[int, float]  # Base rate (0,1) if float
@@ -58,6 +83,8 @@ class AdaptiveSamplingMaskerConfig(SamplingMaskerConfig):
     delta: float  # Confidence bound (0,1)
     init_offset: Union[int, float]  # Start index
     local_offset: Union[int, float]  # End offset
+    sampling_mode: str = "uniform"
+    temperature: float = 1.0
     search_space: Dict[str, Any] = field(
         default_factory=lambda: {
             "base_rate_sampling": tune.grid_search([0.01, 0.02, 0.03]),
@@ -119,6 +146,20 @@ class AdaptiveSamplingMaskerConfig(SamplingMaskerConfig):
                 f"local_offset must be int or float, got {type(self.local_offset)}"
             )
 
+        if self.sampling_mode not in SAMPLING_MODES:
+            raise ValueError(
+                f"sampling_mode must be one of {SAMPLING_MODES}, "
+                f"got {self.sampling_mode!r}"
+            )
+        if self.temperature < 0:
+            raise ValueError(f"temperature must be >= 0, got {self.temperature}")
+        if self.sampling_mode != "uniform" and self.temperature == 0:
+            raise ValueError(
+                "temperature=0 turns importance sampling into a second "
+                "deterministic top-k with no Horvitz-Thompson correction; "
+                "use sampling_mode='uniform' if that is what you want"
+            )
+
 
 @MaskerRegistry.register(AdaptiveSamplingMaskerConfig)
 class AdaptiveSamplingMasker(SamplingMasker):
@@ -144,7 +185,17 @@ class AdaptiveSamplingMasker(SamplingMasker):
     Important Notes:
         - If base_rate_sampling is set to 0, the masker returns the previous mask
           without any modification.
-        - The sampling is performed with replacement for efficiency.
+        - Budget SIZE is the original vAttention (epsilon, delta, base_rate)
+          rule in every mode; sampling_mode only changes how it is spent.
+        - sampling_mode="uniform" (default) is the published draw: uniform with
+          replacement over the whole window. It is performed with replacement
+          for efficiency.
+        - sampling_mode="multinomial" / "gumbel" spend the same budget on the
+          LEFTOVER keys only (positions not already taken by sink, local or a
+          heavy top-k masker), drawn with probability rising in the attention
+          logit. Mask values are inclusion probabilities; attention inverts them
+          via apply_inv_mask, which is what makes the estimator
+          Horvitz-Thompson.
         - The masker ignores the previous mask for base sampling to avoid complex
           index manipulation.
         - Merge operation adds the data in masks and clamps to 1.0.
@@ -176,6 +227,8 @@ class AdaptiveSamplingMasker(SamplingMasker):
         self.delta = config.delta
         self.init_offset = config.init_offset
         self.local_offset = config.local_offset
+        self.sampling_mode = config.sampling_mode
+        self.temperature = config.temperature
 
         # Pre-compute delta_ppf for efficiency
         self.delta_ppf = float(norm.ppf(1 - self.delta))
@@ -301,6 +354,100 @@ class AdaptiveSamplingMasker(SamplingMasker):
 
         return budget
 
+    def _get_leftover_scores(
+        self,
+        expwts: torch.Tensor,
+        previous_mask: Mask,
+        start_idx: int,
+        end_idx: int,
+        sparse_meta_data: Dict[Any, Any],
+        kwargs: Dict[str, Any],
+        scaling: float,
+    ) -> torch.Tensor:
+        """Proposal logits over ``[start_idx, end_idx)``, already-taken keys -inf.
+
+        Reuses the scores a preceding heavy masker published in
+        ``sparse_meta_data["pq_scores"]`` when they cover this window, so the
+        sampling stage does not recompute ``q . k``; otherwise falls back to
+        ``log(expwts)``, the attention scores this masker already computed for
+        the vAttention budget.
+
+        Both sources come back on the TRUE ATTENTION-LOGIT axis, so
+        ``temperature`` means the same thing whichever one fires. PQCache
+        publishes raw ``q . k_hat``, while the attention logit is
+        ``scaling * q . k`` -- and ``scaling = 1/sqrt(head_dim) = 0.088`` for a
+        128-dim head. Sampling the unscaled score at ``temperature=1`` is
+        sampling the real logit at ``temperature=0.088``, which collapses the
+        draw onto the deterministic top-k.
+        """
+        window: torch.Tensor = expwts[..., start_idx:end_idx]
+        sampling_range: int = end_idx - start_idx
+        scores: Optional[torch.Tensor] = None
+        layer_idx = kwargs.get("layer_idx")
+        if layer_idx is not None:
+            published = sparse_meta_data.get("pq_scores", {}).get(layer_idx)
+            offset = sparse_meta_data.get("pq_score_offset", {}).get(layer_idx)
+            if published is not None and offset is not None:
+                rel_start: int = start_idx - int(offset)
+                rel_end: int = end_idx - int(offset)
+                # The leading dims are checked too: the cache is keyed only by
+                # layer, so a prefill entry would otherwise be reused at decode.
+                if (
+                    published.shape[:-1] == window.shape[:-1]
+                    and rel_start >= 0
+                    and rel_end <= published.shape[-1]
+                    and rel_end - rel_start == sampling_range
+                ):
+                    scores = published[..., rel_start:rel_end].to(torch.float32)
+                    scores = scores * scaling
+
+        if scores is None:
+            scores = torch.log(window.to(torch.float32).clamp_min(1e-20))
+
+        leftover: torch.Tensor = scores.clone().to(torch.float32)
+        previous_slice: torch.Tensor = previous_mask.get_dense_mask()[
+            ..., start_idx:end_idx
+        ].to(device=leftover.device)
+        leftover[previous_slice != 0] = float("-inf")
+        # Keys the attention mask kills (future / padding) contribute exactly
+        # zero to the output, so budget spent on them is wasted. In the expwts
+        # fallback they arrive as an underflowed 0.0 that log() floors at a
+        # FINITE -46, which any isfinite() liveness test would count as live.
+        leftover[window == 0] = float("-inf")
+        return leftover
+
+    def _create_importance_sampling_mask(
+        self,
+        leftover_scores: torch.Tensor,
+        budget: torch.Tensor,
+        seq_len_keys: int,
+        start_idx: int,
+        dtype: torch.dtype,
+    ) -> Mask:
+        """Draw the budget from the leftovers; mask values are inclusion probs.
+
+        The mask stores ``pi_i``, not ``1 / pi_i``: ``Mask.apply_inv_mask``
+        divides by the stored value, and that division is what produces the
+        Horvitz-Thompson weight. Storing the reciprocal would both invert the
+        correction and be erased by ``merge_mask``'s ``clamp(m1 + m2, 0, 1)``.
+        """
+        draw = (
+            multinomial_with_inclusion
+            if self.sampling_mode == "multinomial"
+            else gumbel_topk_with_inclusion
+        )
+        _indices, _inclusion, _valid, dense_pi = draw(
+            leftover_scores, budget, self.temperature
+        )
+        dense: torch.Tensor = torch.zeros(
+            *leftover_scores.shape[:-1],
+            seq_len_keys,
+            device=leftover_scores.device,
+            dtype=dtype,
+        )
+        dense[..., start_idx : start_idx + dense_pi.shape[-1]] = dense_pi.to(dtype)
+        return Mask.create_mask_from_dense_mask(dense.shape, dense, dtype=dtype)
+
     def add_mask(
         self,
         keys: torch.Tensor,
@@ -393,16 +540,34 @@ class AdaptiveSamplingMasker(SamplingMasker):
         )
         budget = torch.clamp(budget, min=num_base_samples, max=sampling_range)
 
-        # Create adaptive sampling mask
-        sampling_probabilities = (budget / sampling_range).to(previous_mask.dtype)
-        adaptive_mask = create_sampling_mask_with_per_head_budget(
-            budgets=budget,
-            sampling_probability=sampling_probabilities,
-            seq_len_keys=seq_len_keys,
-            start_idx=start_idx,
-            end_idx=end_idx,
-            dtype=previous_mask.dtype,
-        )
+        # Spend the budget. The budget itself is identical in every mode.
+        if self.sampling_mode == "uniform":
+            sampling_probabilities = (budget / sampling_range).to(previous_mask.dtype)
+            adaptive_mask = create_sampling_mask_with_per_head_budget(
+                budgets=budget,
+                sampling_probability=sampling_probabilities,
+                seq_len_keys=seq_len_keys,
+                start_idx=start_idx,
+                end_idx=end_idx,
+                dtype=previous_mask.dtype,
+            )
+        else:
+            leftover_scores = self._get_leftover_scores(
+                expwts,
+                previous_mask,
+                start_idx,
+                end_idx,
+                sparse_meta_data,
+                kwargs,
+                scaling,
+            )
+            adaptive_mask = self._create_importance_sampling_mask(
+                leftover_scores,
+                budget,
+                seq_len_keys,
+                start_idx,
+                previous_mask.dtype,
+            )
         # Merge masks
         return previous_mask.merge_mask(adaptive_mask, inplace=False)
 
