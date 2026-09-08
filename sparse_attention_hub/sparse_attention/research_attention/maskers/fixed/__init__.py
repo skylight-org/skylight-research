@@ -22,6 +22,8 @@ from .implementations import (
     OracleTopPMaskerConfig,
     PQCache,
     PQCacheConfig,
+    ScaNNTopKMasker,
+    ScaNNTopKMaskerConfig,
     SinkMasker,
     SinkMaskerConfig,
 )
@@ -39,6 +41,7 @@ __all__ = [
     "OracleTopK",
     "OracleTopPMasker",
     "PQCache",
+    "ScaNNTopKMasker",
     "HashAttentionTopKMasker",
     "DoubleSparsityTopKMasker",
     "LocalMaskerConfig",
@@ -46,6 +49,7 @@ __all__ = [
     "OracleTopKConfig",
     "OracleTopPMaskerConfig",
     "PQCacheConfig",
+    "ScaNNTopKMaskerConfig",
     "HashAttentionTopKMaskerConfig",
     "DoubleSparsityTopKMaskerConfig",
 ]
