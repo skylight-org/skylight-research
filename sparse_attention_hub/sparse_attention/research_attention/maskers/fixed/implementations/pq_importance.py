@@ -1,10 +1,10 @@
 """PQ importance sampling masker.
 
 Uses the exact same product quantization as PQCache, but the PQ scores drive a
-multinomial sample instead of a top-k, and the mask stores each selected key's
-inclusion probability. Because get_masked_attention_output divides by the mask
-value, the result is a weighted num/weighted denom estimate of dense attention as in vAttention, instead of a truncation
-of it.
+Gumbel-top-k sample instead of a deterministic top-k, and the mask stores
+``pi_i = exp(s_i)`` for each sampled key. Because get_masked_attention_output
+divides by the mask value, the result is a self-normalized importance-sampling
+estimate of dense attention as in vAttention, instead of a truncation of it.
 
 Kept as a fixed masker rather than a SamplingMasker so that it can be stacked
 with AdaptiveSamplingMasker, which ResearchAttention allows only one of.
@@ -174,10 +174,10 @@ class PQImportance(PQCache):
         attention_mask: torch.Tensor,
         scaling: float,
     ) -> Mask:
-        """Build a mask of top-k keys plus importance samples of the PQ scores.
+        """Build a mask of top-k keys plus Gumbel-top-k samples of the PQ scores.
 
-        Mask values are inclusion probabilities: 1.0 for the top-k stratum, and
-        the sampling probability for the sampled stratum.
+        Mask values are 1.0 for the top-k stratum and ``pi_i = exp(s_i)`` for
+        the sampled stratum (Algorithm 1).
         """
         num_scored: int = scores.shape[-1]
         key_slice: slice = slice(self.init_offset, self.init_offset + num_scored)
@@ -239,6 +239,10 @@ class PQImportance(PQCache):
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """Draw num_samples distinct keys per row using Gumbel-top-k.
 
+        Sampling is Gumbel noise plus top-k (without replacement). Weights are
+        the unnormalized PQ proposal ``pi_i = exp(s_i)``, not the Gumbel-top-k
+        hit probability.
+
         Returns:
             sampled_indices: [..., num_samples]
             inclusion_probabilities: [..., num_samples]
@@ -251,40 +255,25 @@ class PQImportance(PQCache):
         gumbel: torch.Tensor = -torch.log(-torch.log(u))
         perturbed_logits: torch.Tensor = scaled_logits + gumbel
 
+        sampled_indices: torch.Tensor = torch.topk(
+            perturbed_logits,
+            k=actual_samples,
+            dim=-1,
+            largest=True,
+            sorted=True,
+        ).indices
+
         if num_scored > actual_samples:
-            top_values: torch.Tensor
-            top_indices: torch.Tensor
-            top_values, top_indices = torch.topk(
-                perturbed_logits,
-                k=actual_samples + 1,
-                dim=-1,
-                largest=True,
-                sorted=True,
-            )
-            sampled_indices: torch.Tensor = top_indices[..., :actual_samples]
-            threshold: torch.Tensor = top_values[
-                ..., actual_samples : actual_samples + 1
-            ]
             sampled_logits: torch.Tensor = torch.gather(
                 scaled_logits,
                 dim=-1,
                 index=sampled_indices,
             )
-            inclusion_probabilities: torch.Tensor = -torch.expm1(
-                -torch.exp(sampled_logits - threshold)
-            )
-            inclusion_probabilities = inclusion_probabilities.clamp(
-                min=_MIN_INCLUSION_PROBABILITY,
-                max=1.0,
-            )
+            #pi_i = exp(s_i); clamp so exp neither overflows nor underflows to 0
+            inclusion_probabilities: torch.Tensor = torch.exp(
+                sampled_logits.clamp(max=80.0)
+            ).clamp(min=_MIN_INCLUSION_PROBABILITY)
         else:
-            sampled_indices = torch.topk(
-                perturbed_logits,
-                k=actual_samples,
-                dim=-1,
-                largest=True,
-                sorted=True,
-            ).indices
             inclusion_probabilities = torch.ones_like(
                 sampled_indices, dtype=scaled_logits.dtype
             )

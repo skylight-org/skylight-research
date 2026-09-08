@@ -151,14 +151,12 @@ class TestPQImportanceMask:
 
         dense = mask.get_dense_mask()
         active = dense > 0
-        assert dense.max() <= 1.0
         assert dense.min() >= 0.0
         # heavy positions are kept with probability one
         assert (dense == 1.0).any()
-        # with-replacement sampling can only produce fewer distinct positions
+        # gumbel-top-k is without replacement, so the two strata fill the budget
         num_active = active.sum(dim=-1)
-        assert bool((num_active <= 16 + 16).all())
-        assert bool((num_active > 16).all())
+        assert bool((num_active == 16 + 16).all())
         # nothing is selected inside the sink (init_offset) region
         assert not bool(active[:, :, :, :8].any())
 
@@ -244,39 +242,28 @@ class TestPQImportanceMask:
         assert meta["pq_codebook"][0].shape[1] == new_keys.shape[2] - 8
         assert mask.shape == (1, queries.shape[1], 1, new_keys.shape[2])
 
-    def test_estimator_is_unbiased(self):
-        """1/inclusion-probability weighting must recover the softmax denominator.
-
-        Top-k truncation systematically under-estimates it; importance sampling
-        should not.
-        """
+    def test_gumbel_topk_uses_exp_scores_as_pi(self):
+        """Gumbel-top-k returns unique indices and pi_i = exp(s̃_i)."""
         from sparse_attention_hub.sparse_attention.research_attention.maskers.fixed.implementations import (
-            PQCache,
-            PQCacheConfig,
             PQImportance,
             PQImportanceConfig,
         )
 
-        keys, queries, values, scaling = self._setup(seq_len_keys=512, seed=3)
-        logits = torch.matmul(queries, keys.transpose(-2, -1)) * scaling
-        exp_weights = torch.exp(logits - logits.max(dim=-1, keepdim=True).values)
-        true_denominator = exp_weights.sum(dim=-1)
-
-        def mean_denominator(masker, trials):
-            meta = {}
-            estimates = []
-            for _ in range(trials):
-                mask = self._add_mask(masker, keys, queries, values, scaling, meta)
-                estimates.append(mask.apply_inv_mask(exp_weights).sum(dim=-1))
-            return torch.stack(estimates).mean(dim=0)
-
-        torch.manual_seed(7)
-        importance = PQImportance(
-            PQImportanceConfig(heavy_size=16, sample_size=48, **_pq_kwargs())
+        masker = PQImportance(
+            PQImportanceConfig(heavy_size=0, sample_size=8, **_pq_kwargs())
         )
-        importance_ratio = (mean_denominator(importance, 200) / true_denominator).mean()
-        top_k = PQCache(PQCacheConfig(heavy_size=64, **_pq_kwargs()))
-        top_k_ratio = (mean_denominator(top_k, 1) / true_denominator).mean()
+        logits = torch.randn(2, 3, 4, 32)
+        torch.manual_seed(0)
+        sampled_indices, inclusion = masker._importance_sample_gumbel(logits, 8)
 
-        assert abs(float(importance_ratio) - 1.0) < 0.05
-        assert float(top_k_ratio) < float(importance_ratio)
+        assert sampled_indices.shape[-1] == 8
+        # without replacement: unique keys per row
+        sorted_idx = sampled_indices.sort(dim=-1).values
+        assert bool((sorted_idx[..., 1:] != sorted_idx[..., :-1]).all())
+
+        expected = torch.exp(
+            (logits.to(torch.float32) / masker.temperature)
+            .gather(dim=-1, index=sampled_indices)
+            .clamp(max=80.0)
+        ).clamp(min=1e-4)
+        assert torch.allclose(inclusion, expected)
