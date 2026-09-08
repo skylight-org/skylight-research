@@ -1,5 +1,5 @@
 """
-:summary: Tests for the PQImportance (Gumbel-sampled PQCache) masker.
+:summary: Tests for the PQImportance (categorical-with-replacement PQCache) masker.
 """
 
 import pytest
@@ -84,45 +84,61 @@ class TestPQImportanceConfig:
 
 
 @pytest.mark.unit
-class TestGumbelNoise:
-    """The Gumbel-top-k trick itself, independent of PQ."""
+class TestCategoricalInclusion:
+    """iid categorical draws + exact pi_i = 1 - (1 - p_i)^m."""
 
-    def test_noise_matches_gumbel_distribution(self):
-        from sparse_attention_hub.sparse_attention.research_attention.maskers.fixed.implementations.pq_importance import (
-            _sample_gumbel_noise,
+    def test_inclusion_matches_closed_form(self):
+        from sparse_attention_hub.sparse_attention.research_attention.maskers.fixed.implementations.utils.gumbel_utils import (
+            sample_categorical_inclusion,
         )
 
         torch.manual_seed(0)
-        noise = _sample_gumbel_noise(torch.zeros(200_000))
-        assert torch.isfinite(noise).all()
-        # Gumbel(0, 1): mean = Euler-Mascheroni, std = pi / sqrt(6)
-        assert abs(float(noise.mean()) - 0.5772) < 0.02
-        assert abs(float(noise.std()) - 1.2825) < 0.02
+        logits = torch.tensor([[2.0, 1.0, 0.0, -1.0]])
+        m = 5
+        p = torch.softmax(logits, dim=-1)
+        expected = 1.0 - (1.0 - p) ** m
+        _, _, _, dense = sample_categorical_inclusion(logits, m, temperature=1.0)
+        selected = dense > 0
+        assert bool(selected.any())
+        assert torch.allclose(dense[selected], expected[selected], atol=1e-5)
+        assert bool((dense[~selected] == 0).all())
 
-    def test_noise_is_float32(self):
-        from sparse_attention_hub.sparse_attention.research_attention.maskers.fixed.implementations.pq_importance import (
-            _sample_gumbel_noise,
-        )
-
-        scores = torch.zeros(4, 8, dtype=torch.float16)
-        noise = _sample_gumbel_noise(scores)
-        assert noise.dtype == torch.float32
-        assert noise.shape == scores.shape
-        assert torch.isfinite(noise).all()
-
-    def test_argmax_of_perturbed_logits_follows_softmax(self):
-        """Gumbel-top-1 samples from softmax(logits); the point of the masker."""
-        from sparse_attention_hub.sparse_attention.research_attention.maskers.fixed.implementations.pq_importance import (
-            _sample_gumbel_noise,
+    def test_empirical_inclusion_matches_formula(self):
+        from sparse_attention_hub.sparse_attention.research_attention.maskers.fixed.implementations.utils.gumbel_utils import (
+            sample_categorical_inclusion,
         )
 
         torch.manual_seed(0)
         logits = torch.tensor([2.0, 1.0, 0.0, -1.0])
-        trials = 40_000
+        m = 3
+        p = torch.softmax(logits, dim=-1)
+        expected = 1.0 - (1.0 - p) ** m
+        trials = 20_000
         batched = logits.expand(trials, -1)
-        picks = (batched + _sample_gumbel_noise(batched)).argmax(dim=-1)
-        empirical = torch.bincount(picks, minlength=logits.numel()) / trials
-        assert torch.allclose(empirical, torch.softmax(logits, dim=-1), atol=0.01)
+        _, _, _, dense = sample_categorical_inclusion(batched, m, temperature=1.0)
+        empirical = (dense > 0).float().mean(dim=0)
+        assert torch.allclose(empirical, expected, atol=0.02)
+
+    def test_masked_logits_are_never_sampled(self):
+        from sparse_attention_hub.sparse_attention.research_attention.maskers.fixed.implementations.utils.gumbel_utils import (
+            sample_categorical_inclusion,
+        )
+
+        torch.manual_seed(0)
+        scores = torch.tensor([[1.0, float("-inf"), 0.5, float("-inf")]])
+        _, _, _, dense = sample_categorical_inclusion(scores, 8, temperature=1.0)
+        assert bool((dense[..., 1] == 0).all())
+        assert bool((dense[..., 3] == 0).all())
+        assert bool((dense[..., [0, 2]] > 0).any())
+
+    def test_zero_temperature_is_deterministic_topk(self):
+        from sparse_attention_hub.sparse_attention.research_attention.maskers.fixed.implementations.utils.gumbel_utils import (
+            sample_categorical_inclusion,
+        )
+
+        scores = torch.tensor([[0.1, 4.0, 2.0, 3.0, -1.0]])
+        _, _, _, dense = sample_categorical_inclusion(scores, 2, temperature=0.0)
+        assert torch.equal(dense, torch.tensor([[0.0, 1.0, 0.0, 1.0, 0.0]]))
 
 
 @pytest.mark.unit
@@ -174,10 +190,12 @@ class TestPQImportanceMask:
         ).get_dense_mask()
 
         active = dense > 0
-        # Horvitz-Thompson: 1 / pi_i, so selected entries are in [1, 1/min_pi]
+        # inclusion probabilities on the unique set: (0, 1], |S| <= m
         selected = dense[active]
-        assert bool((selected >= 1.0).all())
-        assert bool((active.sum(dim=-1) == 32).all())
+        assert bool((selected > 0).all())
+        assert bool((selected <= 1.0).all())
+        assert bool((active.sum(dim=-1) <= 32).all())
+        assert bool((active.sum(dim=-1) > 0).all())
         # nothing is selected inside the sink (init_offset) region
         assert not bool(active[:, :, :, :8].any())
 
@@ -233,9 +251,12 @@ class TestPQImportanceMask:
         deterministic = self._add_mask(
             top_k, keys, queries, values, scaling, {}
         ).get_dense_mask()
-        # sampling still concentrates on the keys top-k would have chosen
-        overlap = (first.bool() & deterministic.bool()).sum(dim=-1).float().mean()
-        assert float(overlap) > 8
+        # unique |S| <= m; still better than a uniform draw of the same cardinality
+        n_scored = keys.shape[2] - 8
+        n_sampled = first.bool().sum(dim=-1).float()
+        overlap = (first.bool() & deterministic.bool()).sum(dim=-1).float()
+        expected_random = n_sampled * 32.0 / n_scored
+        assert float(overlap.mean()) > float(expected_random.mean())
 
     def test_full_attention_for_short_sequences(self):
         from sparse_attention_hub.sparse_attention.research_attention.maskers.fixed.implementations import (
@@ -299,7 +320,15 @@ class TestPQImportanceMask:
             layer_idx=0,
         )
 
-        active = mask.get_dense_mask() > 0
-        # the 16 pre-selected keys are kept and 32 fresh ones are added
+        dense = mask.get_dense_mask()
+        active = dense > 0
+        # the 16 pre-selected keys are kept; with-replacement unique set is <= 32
         assert bool(active[..., 8:24].all())
-        assert bool((active.sum(dim=-1) == 16 + 32).all())
+        assert bool((dense[..., 8:24] == 1.0).all())
+        newly = (previous_dense == 0) & active
+        assert bool(newly.any())
+        assert not bool(newly[..., 8:24].any())
+        assert bool((newly.sum(dim=-1) <= 32).all())
+        assert bool((active.sum(dim=-1) <= 16 + 32).all())
+        sampled = dense[newly]
+        assert bool((sampled > 0).all() and (sampled <= 1.0).all())

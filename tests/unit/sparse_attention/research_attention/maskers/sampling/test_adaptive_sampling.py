@@ -553,7 +553,7 @@ class TestAdaptiveSamplingMasker:
     def test_importance_sampling_skips_already_selected_keys(
         self, sample_tensors
     ):
-        """Gumbel draw must not re-pick keys sink/local/top-k already took."""
+        """Categorical leftover draws must not re-pick sink/local/top-k keys."""
         keys, queries, values, attention_mask = sample_tensors
         masker = AdaptiveSamplingMasker(
             AdaptiveSamplingMaskerConfig(
@@ -622,7 +622,7 @@ class TestAdaptiveSamplingMasker:
 
 @pytest.mark.unit
 class TestVAttentionPQCacheImportanceSampling:
-    """Sink + Local + PQCache top-k + AdaptiveSampling Gumbel on leftovers."""
+    """Sink + Local + PQCache top-k + AdaptiveSampling categorical leftovers."""
 
     def test_pq_masker_config_alias_builds_pq_cache(self):
         from sparse_attention_hub.sparse_attention.research_attention.maskers.base import (

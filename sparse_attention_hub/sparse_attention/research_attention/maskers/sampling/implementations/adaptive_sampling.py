@@ -22,7 +22,7 @@ from sparse_attention_hub.sparse_attention.research_attention.maskers.base impor
     MaskerRegistry,
 )
 from sparse_attention_hub.sparse_attention.research_attention.maskers.fixed.implementations.utils.gumbel_utils import (
-    gumbel_topk_with_inclusion,
+    sample_categorical_inclusion,
 )
 from sparse_attention_hub.sparse_attention.utils.mask import Mask
 from sparse_attention_hub.sparse_attention.utils.mask_attention_utils import (
@@ -54,11 +54,12 @@ class AdaptiveSamplingMaskerConfig(SamplingMaskerConfig):
         local_offset: Union[int, float] representing the end offset for sampling.
             If int, must be non-negative; if float, must be in [0,1] and will be
             multiplied by the number of keys to get the actual offset.
-        importance_sampling: If True (default on this path), draw the adaptive
-            budget with Gumbel-top-k on leftover keys instead of uniform
-            sampling with replacement. Budget size still comes from (epsilon,
-            delta, base_rate_sampling).
-        temperature: Gumbel noise scale used when importance_sampling is True.
+        importance_sampling: If True (default on this path), spend the
+            adaptive budget as categorical-with-replacement sampling on
+            leftover keys (PQ softmax proposal) instead of uniform sampling.
+            Budget size still comes from (epsilon, delta, base_rate_sampling).
+        temperature: Softmax temperature for the leftover proposal when
+            importance_sampling is True.
     """
 
     base_rate_sampling: Union[int, float]  # Base rate (0,1) if float
@@ -158,10 +159,11 @@ class AdaptiveSamplingMasker(SamplingMasker):
         - If base_rate_sampling is set to 0, the masker returns the previous mask
           without any modification.
         - Budget size is the original vAttention (epsilon, delta, base_rate) rule.
-        - When importance_sampling is True (default), that budget is spent with
-          Gumbel-top-k on leftover keys (positions not already taken by sink,
-          local, or top-k). Mask values are inclusion probabilities; attention
-          inverts them via apply_inv_mask.
+        - When importance_sampling is True (default), that budget is spent as
+          m independent categorical draws on leftover keys (positions not
+          already taken by sink, local, or top-k), with
+          pi_i = 1 - (1 - p_i)^m. Mask values are inclusion probabilities;
+          attention inverts them via apply_inv_mask.
         - When importance_sampling is False, sampling is uniform with replacement
           over [init_offset, seq_len - local_offset), matching the original
           vAttention draw.
@@ -372,29 +374,21 @@ class AdaptiveSamplingMasker(SamplingMasker):
         start_idx: int,
         dtype: torch.dtype,
     ) -> Mask:
-        """Gumbel-top-k on leftover logits; mask values are inclusion probabilities."""
-        batch_size, num_heads, seq_len_queries, _ = leftover_scores.shape
-        indices, inclusion, valid = gumbel_topk_with_inclusion(
+        """Categorical-with-replacement on leftover logits; values are pi."""
+        _indices, _inclusion, _valid, leftover_pi = sample_categorical_inclusion(
             leftover_scores, budget, self.temperature
         )
         dense: torch.Tensor = torch.zeros(
-            batch_size,
-            num_heads,
-            seq_len_queries,
+            leftover_scores.shape[0],
+            leftover_scores.shape[1],
+            leftover_scores.shape[2],
             seq_len_keys,
             device=leftover_scores.device,
             dtype=dtype,
         )
-        full_index: torch.Tensor = torch.where(
-            valid, indices + start_idx, torch.zeros_like(indices)
-        )
-        data: torch.Tensor = torch.where(
-            valid, inclusion.to(dtype), torch.zeros_like(inclusion, dtype=dtype)
-        )
-        dense.scatter_add_(dim=-1, index=full_index, src=data)
-        return Mask.create_mask_from_dense_mask(
-            dense.shape, dense, dtype=dtype
-        )
+        end_idx: int = start_idx + leftover_pi.shape[-1]
+        dense[..., start_idx:end_idx] = leftover_pi.to(dtype)
+        return Mask.create_mask_from_dense_mask(dense.shape, dense, dtype=dtype)
 
     def add_mask(
         self,

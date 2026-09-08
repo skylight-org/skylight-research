@@ -146,7 +146,7 @@ class PQCache(TopKMasker):
         scores: torch.Tensor = self._compute_pq_scores(
             queries, keys, centroids, codebook
         )
-        # Later maskers (AdaptiveSampling) Gumbel-sample leftovers from these.
+        # Later maskers (AdaptiveSampling) sample leftovers from these.
         if "pq_scores" not in sparse_meta_data:
             sparse_meta_data["pq_scores"] = {}
         if "pq_score_offset" not in sparse_meta_data:

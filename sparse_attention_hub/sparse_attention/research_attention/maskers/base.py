@@ -138,7 +138,7 @@ class ResearchMasker(ABC):
         Args:
             data: Optional per-index mask values. Defaults to 1.0 at every
                 selected position (hard top-k). Importance-sampling maskers
-                pass Horvitz-Thompson weights here.
+                pass inclusion probabilities; apply_inv_mask converts to 1/pi.
         """
         mask_shape: Tuple[int, int, int, int] = (
             dims.batch_size,
