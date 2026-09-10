@@ -38,13 +38,9 @@ class PQImportanceConfig(PQCacheConfig):
         sample_size: Number of (or fraction of keys as) importance samples
             drawn from the keys left after the heavy_size stratum. May be 0,
             which reduces this masker to plain PQCache.
-        temperature: Temperature of the proposal distribution. > 1.0 flattens
-            it (more exploration, less sensitivity to PQ error), < 1.0 sharpens
-            it towards top-k.
     """
 
     sample_size: Union[float, int]
-    temperature: float = 1.0
 
     def __post_init__(self) -> None:
         """Validate configuration parameters."""
@@ -58,9 +54,6 @@ class PQImportanceConfig(PQCacheConfig):
 
         if self.heavy_size == 0 and self.sample_size == 0:
             raise ValueError("at least one of heavy_size / sample_size must be > 0")
-
-        if self.temperature <= 0:
-            raise ValueError(f"temperature must be > 0, got {self.temperature}")
 
         if self.pq_group_factor <= 0:
             raise ValueError(f"pq_group_factor must be > 0, got {self.pq_group_factor}")
@@ -94,7 +87,6 @@ class PQImportance(PQCache):
         """Initialize PQ importance masker with configuration."""
         super().__init__(config)
         self.sample_size = config.sample_size
-        self.temperature = config.temperature
 
     def add_mask(
         self,
@@ -245,7 +237,7 @@ class PQImportance(PQCache):
         """
         batch_size, num_heads, seq_len_queries, num_scored = logits.shape
 
-        probabilities: torch.Tensor = torch.softmax(logits / self.temperature, dim=-1)
+        probabilities: torch.Tensor = torch.softmax(logits, dim=-1)
         #a fully masked row softmaxes to nan; the floor makes it uniform instead
         probabilities = torch.nan_to_num(probabilities, nan=0.0) + _PROB_FLOOR
         probabilities = probabilities / probabilities.sum(dim=-1, keepdim=True)

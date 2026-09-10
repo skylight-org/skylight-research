@@ -26,7 +26,6 @@ class TestPQImportanceConfig:
         config = PQImportanceConfig(heavy_size=10, sample_size=20, **_pq_kwargs(4))
         assert config.heavy_size == 10
         assert config.sample_size == 20
-        assert config.temperature == 1.0
 
     def test_config_allows_zero_heavy_size(self):
         """Pure importance sampling is valid, unlike for other top-k maskers."""
@@ -48,10 +47,6 @@ class TestPQImportanceConfig:
             PQImportanceConfig(heavy_size=-1, sample_size=10, **_pq_kwargs())
         with pytest.raises(ValueError):
             PQImportanceConfig(heavy_size=10, sample_size=-1, **_pq_kwargs())
-        with pytest.raises(ValueError):
-            PQImportanceConfig(
-                heavy_size=10, sample_size=10, temperature=0.0, **_pq_kwargs()
-            )
         with pytest.raises(ValueError):
             PQImportanceConfig(
                 heavy_size=10,
