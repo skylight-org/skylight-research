@@ -197,8 +197,9 @@ def test_peak_memory_at_64k_matches_the_closed_form():
         f"(predicted {predicted / GIB:.2f}, pre-patch {old / GIB:.2f})"
     )
     assert transient < 1.15 * predicted, (
-        f"{transient / GIB:.2f} GiB exceeds predicted {predicted / GIB:.2f} + 15%; a "
-        f"missing `del` leaves the previous iteration's tensor alive across the loop"
+        f"{transient / GIB:.2f} GiB exceeds predicted {predicted / GIB:.2f} plus 15 "
+        f"percent, which is what a missing del looks like: the previous iteration's "
+        f"tensor is still alive when the next one is allocated"
     )
     assert transient > 0.85 * s4, (
         f"{transient / GIB:.2f} GiB is far below S4 = {s4 / GIB:.2f} GiB -- the loop "
