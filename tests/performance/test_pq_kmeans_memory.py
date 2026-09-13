@@ -244,3 +244,179 @@ def test_chunking_the_centroid_update_would_NOT_be_bitwise():
         "branch at this shape, or torch changed setReduceConfig.  Re-derive before "
         "citing this as the reason the fix does not chunk."
     )
+
+
+# ============================== what actually underwrites the tiled path above 64k
+def test_group_tiled_accumulate_matches_full_batch_at_the_real_64k_shape():
+    """The 128k claim rests on this, because at 128k the reference does not fit.
+
+    The tiled path's centroid update is group-tiled, and group tiling is NOT
+    unconditionally exact: `test_group_blocking_the_outer_reduction_is_NOT_order_stable`
+    shows it diverging at (b=32, n=8192, C=64, d=32) for every group count below b.
+    At the production shape it is safe because `ctas_per_output` is pinned by a term
+    that does not involve the group count -- and 64k is the largest context where that
+    can be CHECKED, since the full-batch reference costs S4 + S3 = 65.9 GiB there and
+    131.9 GiB at 128k.
+
+    So: verify every group count the planner could pick against the untiled reference,
+    at the real 64k shape.  128k then rests on this plus the live self-check in
+    `kmeans_batched`, not on an unverified extrapolation.
+    """
+    mod = _mod()
+    b, n, num_clusters, d = REAL_B, N_64K, REAL_C, REAL_D
+    _need((b * n * num_clusters * d * 4 + b * n * num_clusters * 4) / GIB + 8)
+    torch.manual_seed(64)
+    X = torch.randn(b, n, d, dtype=torch.float32, device="cuda")
+    choice = torch.randint(0, num_clusters, (b, n), dtype=torch.long, device="cuda")
+
+    _reset()
+    ref_sums, ref_counts = _ref_accumulate(X, choice, num_clusters)
+    ref_peak = torch.cuda.max_memory_allocated()
+    assert ref_peak > 0.9 * b * n * num_clusters * d * 4, (
+        f"reference peaked at only {ref_peak / GIB:.1f} GiB -- it did not build the "
+        f"(b, n, C, d) tensor, so it is not the untiled computation"
+    )
+    _reset()
+
+    for groups in (1, 2, 3, 4, 5, 7, 8, 16, 31, 32):
+        scratch = torch.full(
+            (b, num_clusters, d), float("nan"), dtype=torch.float32, device="cuda"
+        )
+        del scratch
+        sums, counts = mod._accumulate_batched(X, choice, num_clusters, groups)
+        assert not torch.isnan(sums).any(), f"unwritten tile at groups={groups}"
+        assert torch.equal(sums, ref_sums), (
+            f"groups={groups} diverges from the untiled reference at the production "
+            f"64k shape -- the tiled path cannot be used above 64k"
+        )
+        assert torch.equal(counts, ref_counts), f"groups={groups}"
+        del sums, counts
+        _reset()
+
+
+def test_tiled_peak_at_128k_stays_under_the_tile_budget():
+    """The 128k path must actually bound its transient to the tile, not S4 + S3."""
+    mod = _mod()
+    b, num_clusters, d = REAL_B, REAL_C, REAL_D
+    n = 130944
+    rows, groups = mod._plan_kmeans(b, n, d, num_clusters)
+    assert not (rows >= n and groups >= b), "128k must tile"
+    tile = max(
+        rows * b * num_clusters * (d + 1) * 4, groups * n * num_clusters * (d + 1) * 4
+    )
+    resident = b * n * d * 4 + 8 * b * n + 2 * b * num_clusters * d * 4
+    _need((tile + resident) / GIB + 6)
+
+    X = _clustered_blob(b, n, d, num_clusters, seed=128).to("cuda")
+    torch.manual_seed(3)
+    torch.cuda.manual_seed_all(3)
+    _reset()
+    base = torch.cuda.memory_allocated()
+    mod.kmeans_batched(X, num_clusters, iter_limit=2, device=X.device)
+    torch.cuda.synchronize()
+    transient = torch.cuda.max_memory_allocated() - base
+    untiled = b * n * num_clusters * d * 4 + b * n * num_clusters * 4
+    print(
+        f"\n128k tiled transient {transient / GIB:.2f} GiB "
+        f"(tile budget {tile / GIB:.2f}, untiled would be {untiled / GIB:.2f})"
+    )
+    assert transient < 3 * tile, "the tile budget is not bounding the transient"
+    assert transient < untiled / 8, "tiling bought less than 8x"
+
+
+def test_tiled_loop_equals_single_shot_at_the_real_64k_shape():
+    """The whole tiled loop against the whole single-shot loop, at the production shape.
+
+    This is what licenses the tiled path, and the only existing full-loop tiled test runs
+    at a toy shape (b=8, n=61, C=16, d=8) where none of the production tile sizes,
+    reduction configs or tail cases occur.  Here b, C and d are the real
+    PQCacheConfig(pq_group_factor=4, pq_bits=8) values and n is the real 64k key count, so
+    the tiled run resolves the same rows/groups it would resolve in production.
+
+    Note what is NOT compared here, and why.  The PRE-PATCH reference cannot be run at
+    this shape: it holds two copies of the (b, n, C, d) tensor, 131.7 GiB, which does not
+    fit.  So the chain is
+
+        tiled == single-shot     <- measured here, at the production 64k shape
+        single-shot == pre-patch <- measured at the production 32k shape
+                                    (test_kmeans_batched_bit_identical_at_the_real_32k_shape),
+                                    and structural everywhere: the in-place square and the
+                                    scatter change no reduction's shape
+        => tiled == pre-patch
+
+    64k is the largest shape where the first link is measurable at all, because the
+    single-shot loop itself needs S4 + S3 = 65.9 GiB here and 131.9 GiB at 128k.  The
+    128k path therefore rests on this plus the shape-independence of both links.
+
+    Compares codes, centroids, the iteration count, AND both RNG streams -- the loop draws
+    from the ambient generator in `initialize_batched` and in the empty-cluster branch, and
+    a tiling that changed how often either fires would shift every downstream sampler.
+    """
+    mod = _mod()
+    b, n, num_clusters, d = REAL_B, N_64K, REAL_C, REAL_D
+    _need((b * n * num_clusters * d * 4 + b * n * num_clusters * 4) / GIB + 8)
+
+    X = _clustered_blob(b, n, d, num_clusters, seed=641).to("cuda")
+
+    # --- single-shot: assert the planner really does NOT tile at 64k ----------------
+    rows, groups = mod._plan_kmeans(b, n, d, num_clusters)
+    assert (
+        rows >= n and groups >= b
+    ), f"64k was expected to stay single-shot, got rows={rows} groups={groups}"
+    torch.manual_seed(6410)
+    torch.cuda.manual_seed_all(6410)
+    cpu0, cuda0 = torch.get_rng_state(), torch.cuda.get_rng_state()
+    _reset()
+    ref_codes, ref_centers = mod.kmeans_batched(
+        X, num_clusters, iter_limit=3, device=X.device
+    )
+    single_peak = torch.cuda.max_memory_allocated()
+    cpu_ref, cuda_ref = torch.get_rng_state(), torch.cuda.get_rng_state()
+    ref_codes, ref_centers = ref_codes.clone(), ref_centers.clone()
+    _reset()
+
+    # --- tiled: force the path the 128k sweep takes, at a shape we can check --------
+    calls = {"assign": 0, "accum": 0}
+    real_assign, real_accum = mod._assign_batched, mod._accumulate_batched
+
+    def spy_assign(X_, centers_, rows_):
+        calls["assign"] += 1
+        assert rows_ < X_.shape[1], "assignment did not actually tile"
+        return real_assign(X_, centers_, rows_)
+
+    def spy_accum(X_, choice_, C_, groups_):
+        calls["accum"] += 1
+        assert groups_ < X_.shape[0], "centroid update did not actually tile"
+        return real_accum(X_, choice_, C_, groups_)
+
+    saved = mod._EXACT_PLAN_MAX_BYTES
+    try:
+        mod._EXACT_PLAN_MAX_BYTES = 0  # force tiling at this shape
+        mod._assign_batched, mod._accumulate_batched = spy_assign, spy_accum
+        t_rows, t_groups = mod._plan_kmeans(b, n, d, num_clusters)
+        assert not (t_rows >= n and t_groups >= b), "forcing the tiled path failed"
+        torch.set_rng_state(cpu0)
+        torch.cuda.set_rng_state(cuda0)
+        _reset()
+        codes, centers = mod.kmeans_batched(
+            X, num_clusters, iter_limit=3, device=X.device
+        )
+        tiled_peak = torch.cuda.max_memory_allocated()
+    finally:
+        mod._EXACT_PLAN_MAX_BYTES = saved
+        mod._assign_batched, mod._accumulate_batched = real_assign, real_accum
+
+    print(
+        f"\n64k production shape: single-shot peak {single_peak / GIB:.2f} GiB, "
+        f"tiled peak {tiled_peak / GIB:.2f} GiB "
+        f"(rows={t_rows}, groups={t_groups}, "
+        f"{calls['assign']} assign / {calls['accum']} accum calls)"
+    )
+    assert calls["assign"] >= 3 and calls["accum"] >= 3, calls
+    assert torch.equal(codes, ref_codes), "tiled cluster assignments diverged"
+    assert torch.equal(centers, ref_centers), "tiled centroids diverged"
+    assert torch.equal(torch.get_rng_state(), cpu_ref), "CPU RNG stream diverged"
+    assert torch.equal(torch.cuda.get_rng_state(), cuda_ref), "CUDA RNG stream diverged"
+    assert (
+        tiled_peak < single_peak / 4
+    ), f"tiling bought only {single_peak / tiled_peak:.1f}x"

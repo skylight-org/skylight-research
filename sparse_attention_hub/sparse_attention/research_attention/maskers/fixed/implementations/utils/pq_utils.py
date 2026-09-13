@@ -270,6 +270,172 @@ def pairwise_distance_batched(
     return dis
 
 
+# --- memory-bounded k-means internals, for contexts above ~64k -----------------------
+#
+# Squaring the distance in place (see `pairwise_distance_batched`) halves the peak and
+# is enough through a 64k context: the transient is S4 + S3 where
+#
+#     S4 = 4 * 2**pq_bits * kv_heads * head_dim * n_keys   # the (b, n, C, d) fp32 temp
+#     S3 = 4 * 2**pq_bits * b * n_keys                     # the (b, n, C) fp32 temps
+#
+# S4 is exactly 1 MiB per context key at pq_bits=8 and is invariant in
+# pq_group_factor, so S4 + S3 is 32.9 GiB at 32k, 65.9 GiB at 64k and 131.9 GiB at
+# 128k.  Measured end to end on an H200: 105.30 GiB of process peak at 64k against
+# 139.80 GiB of device, and the same arithmetic puts 128k around 197 GiB.  So above 64k
+# there is no choice but to tile.
+#
+# The two phases are tiled along DIFFERENT axes, for different reasons.
+#
+#   assignment      tiled over ROWS.  Bit-invariant by construction: the only reduction
+#                   is `sum(dim=-1)` over d, which is the fastest-striding dimension,
+#                   so `values_per_thread` is ceil(d / 32) = 1 -- far below the 256
+#                   threshold that gates the CTA-splitting branch, the only part of
+#                   PyTorch's reduction config that reads the grid size.  The
+#                   decomposition is therefore the same warp-shuffle tree at every
+#                   block size, on every device.
+#
+#   centroid update tiled over GROUPS, never rows.  `cluster_sums` reduces over n;
+#                   splitting n and adding the partials re-associates those additions
+#                   and moves the centroids at the 1e-5 level, which flips downstream
+#                   argmins.  Slicing groups keeps each output element's reduction over
+#                   the full n inside one kernel launch.
+#
+# Group tiling is NOT unconditionally exact, and that is measured rather than assumed:
+# at (b=32, n=8192, C=64, d=32) on an H200 a group-tiled `sum(dim=1)` differs from the
+# full-batch result for EVERY group count below b, because `num_outputs` feeds grid().x
+# and selects a different `ctas_per_output`.
+#
+# It IS exact at every shape this code tiles, for a reason that can be stated exactly.
+# `ctas_per_output = max(min(cpo1, cpo2), cpo3)` with
+# `cpo1 = div_up(target_grid_size, grid)` and `cpo3 = div_up(values_per_thread, 256)`.
+# `cpo3` depends only on n; `cpo1` is bounded by `div_up(2112, 64) = 33` at this
+# geometry.  Once n is beyond roughly 34k, `cpo3 >= 33 >= cpo1` and the group count
+# drops out of the answer entirely -- and tiling does not begin until n is around
+# 71,500.  The counter-example above has n = 8192, far below that crossover.  (Torch
+# reaches the same place a second way: this iterator cannot use 32-bit indexing, and
+# `get_dim_to_split` peels the batch axis first, so the untiled reduction is already
+# decomposed into single-group sub-iterators before any tiling is applied.)
+#
+# That derivation is checked against reality rather than trusted:
+# `test_group_tiled_accumulate_matches_full_batch_at_the_real_64k_shape` compares every
+# group count 1..32 against the untiled reference at the production 64k shape -- the
+# largest where the reference still fits (65.9 GiB; 131.9 at 128k) -- and
+# `test_group_blocking_the_outer_reduction_is_NOT_order_stable` pins the counter-example
+# so that a torch change which moved the crossover would be caught.
+#
+# An earlier revision carried a runtime self-check here instead.  It was removed:
+# simulating `setReduceConfig` showed its refusal branch is unreachable at any shape
+# that tiles (by the argument above), while its comparison allocation was 12.36 GiB
+# against an 8.00 GiB tile -- 55% of the 128k peak spent on a guard that cannot fire.
+# The tests are the right home for this check, because they can afford the memory that
+# makes it meaningful.
+
+#: Below this working set, do not tile at all.
+#:
+#: Derived from a measurement rather than guessed.  On an H200 with
+#: Llama-3.1-8B-Instruct, a 64k RULER context (n = 64,917) peaks at 105.30 GiB, of
+#: which 65.37 GiB is this transient and 39.93 GiB is everything else live at that
+#: moment.  Both terms are linear in n, so the whole process peak is ~105.30 * n/64,917
+#: GiB and a 139.80 GiB device runs out at n ~= 85,500.  A 72 GiB ceiling on the
+#: transient corresponds to n ~= 71,500, i.e. it keeps every context through 64k (and a
+#: little above) on the unconditionally-exact single-shot path while leaving ~24 GiB of
+#: headroom, and tiles anything larger.  128k (131.9 GiB) is comfortably above it.
+#:
+#: A CONSTANT, not a free-memory query: deriving it from machine state would make the
+#: numerical output depend on what else happened to be resident on the device.  The
+#: consequence is deliberate -- on a smaller card a 64k context OOMs here instead of
+#: quietly switching to the tiled path and producing different bits.
+#:
+#: Note the worst case is NOT the longest context.  Peak is discontinuous at the
+#: ceiling: n = 71,400 stays untiled and is modelled at ~114 GiB, while n = 71,500 tiles
+#: and drops to ~58, and 128k lands at ~78.  So the largest peak this code can produce
+#: sits just BELOW the ceiling, not at the top of the supported range.
+_EXACT_PLAN_MAX_BYTES: int = 72 * 1024**3
+
+#: Per-tile budget once tiling is on.  Genuinely free on both axes at the shapes this
+#: code tiles: row tiling cannot change a bit, and the group count drops out of the
+#: centroid update's reduction once n is past the crossover (see the note above), which
+#: every tiling shape is.  Note it sits just under 2**31 fp32 elements per row tile --
+#: raising it past ~8.25 GiB would push a tile over INT32_MAX and into torch's
+#: 32-bit-indexing split path.
+_TILE_CHUNK_BYTES: int = 8 * 1024**3
+
+
+def _plan_kmeans(b: int, n: int, d: int, num_clusters: int) -> Tuple[int, int]:
+    """Tile sizes for one k-means problem, as a pure function of its shape.
+
+    Returns ``(rows, groups)``.  ``rows >= n`` and ``groups >= b`` mean "do not tile",
+    and the callers then run the single-shot code verbatim.
+    """
+    element = 4  # the loop runs in fp32
+    s4 = b * n * num_clusters * d * element
+    s3 = b * n * num_clusters * element
+    if s4 + s3 <= _EXACT_PLAN_MAX_BYTES:
+        return n, b
+    per_row = b * num_clusters * (d + 1) * element
+    per_group = n * num_clusters * (d + 1) * element
+    rows = max(1, min(n, _TILE_CHUNK_BYTES // max(1, per_row)))
+    groups = max(1, min(b, _TILE_CHUNK_BYTES // max(1, per_group)))
+    return rows, groups
+
+
+def _assign_batched(X: torch.Tensor, centers: torch.Tensor, rows: int) -> torch.Tensor:
+    """``argmin`` over clusters of the squared distance, in blocks of ``rows`` rows.
+
+    Bit-identical to ``argmin(pairwise_distance_batched(X, centers), dim=2)`` at every
+    block size: each output row depends only on its own slice of X, and the reduction
+    over d cannot change its decomposition (see the note above).
+    """
+    b, n, _d = X.shape
+    if rows >= n:
+        return torch.argmin(
+            pairwise_distance_batched(X, centers, device=X.device, tqdm_flag=False),
+            dim=2,
+        )
+    out = torch.empty((b, n), dtype=torch.long, device=X.device)
+    B = centers.unsqueeze(1)
+    for start in range(0, n, rows):
+        stop = min(start + rows, n)
+        dis = X[:, start:stop, :].unsqueeze(2) - B
+        dis.pow_(2.0)
+        dis = dis.sum(dim=-1)
+        out[:, start:stop] = torch.argmin(dis, dim=2)
+        del dis  # a Python local outlives the iteration; the next tile needs the room
+    return out
+
+
+def _accumulate_batched(
+    X: torch.Tensor, choice_cluster: torch.Tensor, num_clusters: int, groups: int
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Per-cluster sums and counts, a few groups at a time."""
+    b, n, d = X.shape
+    if groups >= b:
+        mask = torch.zeros((b, n, num_clusters), dtype=X.dtype, device=X.device)
+        mask.scatter_(2, choice_cluster.unsqueeze(-1), 1.0)
+        mask_expanded = mask.unsqueeze(-1)
+        sums = (X.unsqueeze(2) * mask_expanded).sum(dim=1)
+        counts = mask.sum(dim=1)
+        del mask, mask_expanded
+        return sums, counts
+
+    sums = torch.empty((b, num_clusters, d), dtype=X.dtype, device=X.device)
+    counts = torch.empty((b, num_clusters), dtype=X.dtype, device=X.device)
+    for start in range(0, b, groups):
+        stop = min(start + groups, b)
+        mask = torch.zeros(
+            (stop - start, n, num_clusters), dtype=X.dtype, device=X.device
+        )
+        mask.scatter_(2, choice_cluster[start:stop].unsqueeze(-1), 1.0)
+        mask_expanded = mask.unsqueeze(-1)
+        # Assign through a slice rather than `out=sums[start:stop]`: the reduction's
+        # output must be a freshly allocated contiguous tensor, because PyTorch's
+        # reduction config reads operand addresses and strides.
+        sums[start:stop] = (X[start:stop].unsqueeze(2) * mask_expanded).sum(dim=1)
+        counts[start:stop] = mask.sum(dim=1)
+        del mask, mask_expanded
+    return sums, counts
+
+
 def kmeans_batched(
     X: torch.Tensor,
     num_clusters: int,
@@ -355,48 +521,25 @@ def kmeans_batched(
     if tqdm_flag:
         tqdm_meter = tqdm(desc="[running batched kmeans]")
 
+    # Tile sizes from the SHAPE alone.  Below _EXACT_PLAN_MAX_BYTES both come back as
+    # "do not tile" and the helpers run the single-shot code verbatim, so every context
+    # through 64k keeps the unconditionally-exact path.
+    rows, groups = _plan_kmeans(b, n, d, num_clusters)
+
     # Main k-means loop
     while True:
-        # Compute pairwise distances: (b, n, num_clusters)
-        dis = pairwise_distance_batched(
-            X, initial_state, device=device, tqdm_flag=False
-        )
-
-        # Assign each sample to nearest cluster: (b, n)
-        choice_cluster = torch.argmin(dis, dim=2)
-
-        # Loop locals outlive the iteration, so without these the previous iteration's
-        # tensors are still alive when the next ones are allocated.  `mask_expanded` is
-        # a view of `mask`; dropping only `mask` would free nothing.
-        del dis
+        # Assign each sample to nearest cluster: (b, n).  Row-tiled above the ceiling;
+        # the tiling cannot change a bit (see _assign_batched).
+        choice_cluster = _assign_batched(X, initial_state, rows)
 
         # Store previous state for convergence check
         initial_state_pre = initial_state.clone()
 
-        # Update cluster centers using vectorized one-hot masking.
-        # Create one-hot encoded mask: (b, n, num_clusters).
-        #
-        # Scattering into zeros gives the same exact 0.0/1.0 values in the same
-        # contiguous layout as `one_hot(choice_cluster, num_clusters).float()`, without
-        # the int64 tensor one_hot materialises first (4 GiB at a 64k context).  X is
-        # already fp32 here, which is what makes `dtype=X.dtype` equal to `.float()`.
-        # One index per (b, n) row, so `scatter_` is deterministic (`scatter_add_`
-        # would not be).
-        mask = torch.zeros((b, n, num_clusters), dtype=X.dtype, device=X.device)
-        mask.scatter_(2, choice_cluster.unsqueeze(-1), 1.0)
-
-        # Expand X to include cluster dimension: (b, n, 1, d)
-        X_expanded = X.unsqueeze(2)
-
-        # Expand mask: (b, n, num_clusters, 1)
-        mask_expanded = mask.unsqueeze(-1)
-
-        # Compute weighted sum for each cluster: (b, num_clusters, d)
-        cluster_sums = (X_expanded * mask_expanded).sum(dim=1)
-
-        # Count points per cluster: (b, num_clusters)
-        cluster_counts = mask.sum(dim=1)
-        del mask, mask_expanded
+        # Per-cluster sums and counts.  Group-tiled above the ceiling, never row-tiled:
+        # cluster_sums reduces over n, and splitting n re-associates those additions.
+        cluster_sums, cluster_counts = _accumulate_batched(
+            X, choice_cluster, num_clusters, groups
+        )
 
         # Identify empty clusters
         empty_clusters = cluster_counts == 0  # (b, num_clusters)

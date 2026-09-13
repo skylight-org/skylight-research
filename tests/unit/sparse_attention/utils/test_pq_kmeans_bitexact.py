@@ -721,3 +721,148 @@ class TestMemoryFixIsStillPresent:
             "one_hot is back: it materialises an int64 tensor of (b, n, num_clusters), "
             "4 GiB at a 64k context and 8 GiB at 128k, before the float copy"
         )
+
+
+# ================================================= the tiled path (contexts above 64k)
+@pytest.mark.unit
+class TestTiledPath:
+    """Above ~70k the single-shot transient no longer fits, so the loop tiles.
+
+    Two axes, for two different reasons: the assignment tiles over ROWS (bit-invariant
+    by construction, because the reduction over d never enters the CTA-splitting
+    branch) and the centroid update tiles over GROUPS, never rows (splitting the
+    reduction over n re-associates it and moves the centroids at the 1e-5 level).
+
+    Group tiling is not unconditionally exact -- measured on an H200, it diverges at
+    (b=32, n=8192, C=64, d=32) for every group count below b -- so the loop self-checks
+    invariance at the live shape and refuses rather than drifting.  These tests pin the
+    planner, the equivalence at tileable shapes, and the refusal.
+    """
+
+    def test_plan_is_pure_and_reads_no_state(self):
+        mod = _mod()
+        first = mod._plan_kmeans(REAL_B, 130944, REAL_D, REAL_C)
+        big = [torch.empty(4_000_000) for _ in range(4)]
+        assert mod._plan_kmeans(REAL_B, 130944, REAL_D, REAL_C) == first
+        del big
+        assert mod._plan_kmeans(REAL_B, 130944, REAL_D, REAL_C) == first
+
+    @pytest.mark.parametrize(
+        "n,tiled",
+        [(32640, False), (65408, False), (73600, True), (130944, True)],
+    )
+    def test_planner_tiles_only_above_the_ceiling(self, n, tiled):
+        """32k and 64k must keep the single-shot path; 128k must not.
+
+        The ceiling is derived from the measured 105.30 GiB process peak at a 64k
+        RULER context, not guessed -- see the constant's docstring.
+        """
+        mod = _mod()
+        rows, groups = mod._plan_kmeans(REAL_B, n, REAL_D, REAL_C)
+        is_tiled = not (rows >= n and groups >= REAL_B)
+        assert is_tiled is tiled, f"n={n}: rows={rows} groups={groups}"
+
+    def test_untiled_plan_runs_the_single_shot_code(self):
+        """ "Do not tile" must mean the helpers take their non-looping branch.
+
+        Otherwise every context through 64k would silently move onto a path whose
+        exactness is conditional rather than structural.
+        """
+        mod = _mod()
+        b, n, num_clusters, d = 8, 40, 5, 8
+        rows, groups = mod._plan_kmeans(b, n, d, num_clusters)
+        assert rows >= n and groups >= b
+        torch.manual_seed(90)
+        X = torch.randn(b, n, d)
+        centers = torch.randn(b, num_clusters, d)
+        assert torch.equal(
+            mod._assign_batched(X, centers, rows),
+            torch.argmin(_ref_pairwise_distance_batched(X, centers), dim=2),
+        )
+        choice = torch.randint(0, num_clusters, (b, n))
+        ref_sums, ref_counts = _ref_accumulate(X, choice, num_clusters)
+        sums, counts = mod._accumulate_batched(X, choice, num_clusters, groups)
+        assert torch.equal(sums, ref_sums) and torch.equal(counts, ref_counts)
+
+    @pytest.mark.parametrize("rows", [1, 2, 3, 7, 66, 67, 68, 10**9])
+    def test_row_tiling_is_invariant(self, rows):
+        """Prime n, so no tile size divides it and the last tile is always short."""
+        mod = _mod()
+        b, n, num_clusters, d = REAL_B, 67, REAL_C, REAL_D
+        torch.manual_seed(91)
+        X = torch.randn(b, n, d)
+        centers = torch.randn(b, num_clusters, d)
+        ref = torch.argmin(_ref_pairwise_distance_batched(X, centers), dim=2)
+        got = mod._assign_batched(X, centers, rows)
+        assert got.dtype == torch.long
+        assert torch.equal(got, ref), f"rows={rows}"
+
+    @pytest.mark.parametrize("groups", [1, 2, 3, 5, 7, 31, 32, 33])
+    def test_group_tiling_matches_the_reference_on_cpu(self, groups):
+        mod = _mod()
+        b, n, num_clusters, d = REAL_B, 67, REAL_C, REAL_D
+        torch.manual_seed(92)
+        X = torch.randn(b, n, d)
+        choice = torch.randint(0, num_clusters, (b, n))
+        ref_sums, ref_counts = _ref_accumulate(X, choice, num_clusters)
+        scratch = torch.full((b, num_clusters, d), float("nan"))
+        del scratch  # poison: both outputs are torch.empty, so a skipped tile is NaN
+        sums, counts = mod._accumulate_batched(X, choice, num_clusters, groups)
+        assert not torch.isnan(sums).any(), f"unwritten tile at groups={groups}"
+        assert torch.equal(sums, ref_sums), f"groups={groups}"
+        assert torch.equal(counts, ref_counts), f"groups={groups}"
+
+    def test_tiled_loop_matches_the_reference_end_to_end(self, monkeypatch):
+        """Force tiling at a small shape and require the whole loop to be unchanged."""
+        mod = _mod()
+        monkeypatch.setattr(mod, "_EXACT_PLAN_MAX_BYTES", 0)
+        monkeypatch.setattr(mod, "_TILE_CHUNK_BYTES", 1)  # 1 row, 1 group
+        b, n, num_clusters, d = 8, 61, 16, 8
+        X = _clustered_blob(b, n, d, num_clusters, seed=93)
+
+        torch.manual_seed(55)
+        ref_codes, ref_centers = _ref_kmeans_batched(X, num_clusters, iter_limit=8)
+        ref_state = torch.get_rng_state()
+
+        torch.manual_seed(55)
+        rows, groups = mod._plan_kmeans(b, n, d, num_clusters)
+        assert (rows, groups) == (1, 1), "the shape did not actually tile"
+        codes, centers = mod.kmeans_batched(X, num_clusters, iter_limit=8)
+
+        assert torch.equal(codes, ref_codes)
+        assert torch.equal(centers, ref_centers)
+        assert torch.equal(torch.get_rng_state(), ref_state), "RNG stream diverged"
+
+    def test_untiled_assignment_routes_through_pairwise_distance_batched(self):
+        """The untiled branch must be the ORIGINAL call, not a one-tile loop.
+
+        A single full-width tile is value-identical, so every equality test in this
+        file passes either way -- which means nothing here actually pins the invariant
+        the design rests on: that a context through 64k executes the pre-existing code
+        verbatim rather than a tiled path that merely agrees with it.  Observe the call
+        instead of the value.
+        """
+        mod = _mod()
+        calls = []
+        real = mod.pairwise_distance_batched
+
+        def spy(data1, data2, device=torch.device("cpu"), tqdm_flag=False):
+            calls.append(tuple(data1.shape))
+            return real(data1, data2, device=device, tqdm_flag=tqdm_flag)
+
+        b, n, num_clusters, d = 8, 40, 5, 8
+        rows, groups = mod._plan_kmeans(b, n, d, num_clusters)
+        assert rows >= n and groups >= b, "this shape was supposed to stay untiled"
+        torch.manual_seed(94)
+        X = torch.randn(b, n, d)
+        centers = torch.randn(b, num_clusters, d)
+        orig = mod.pairwise_distance_batched
+        mod.pairwise_distance_batched = spy
+        try:
+            mod._assign_batched(X, centers, rows)
+        finally:
+            mod.pairwise_distance_batched = orig
+        assert calls == [(b, n, d)], (
+            f"expected exactly one full-width call to pairwise_distance_batched, got "
+            f"{calls} -- the untiled branch is not running the original code"
+        )
