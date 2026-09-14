@@ -36,6 +36,17 @@ assumed (upstream sha 219f68e):
   contexts are 42-46k tokens under Llama-3.1's tokenizer, so a `max_context_length` of
   32768 silently truncates ~25-30% of the corpus, gold passages included.  Set it from
   the tokenizer you are actually running.
+
+* GENERATION BUDGET -- the mirror carries max_new_tokens=256 on every row; upstream
+  imposes no output cap at all (inference/models.py builds GenerationConfig without
+  max_output_tokens).  Note that `benchmark/base.py` takes min(caller, row), so the row
+  value is a HARD ceiling that no generation_kwargs can raise.  Left at 256 deliberately:
+  with the chain-of-thought restored the answer comes last, and the cap does bind on ~11%
+  of rows -- but those are degenerate generations that loop on corpus text rather than
+  nearly-finished answers.  Measured on Llama-3.1-8B-Instruct over four subsets, doubling
+  to 512 recovered only 6 of 49 unparseable rows (1.5% of all rows) and musique recovered
+  0 of 20, so the cost is not worth the fidelity gain.  Parsed answers finish by token
+  238 (p99 219).
 """
 
 from typing import Any, Dict, List
