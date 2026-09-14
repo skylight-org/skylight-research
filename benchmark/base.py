@@ -52,10 +52,9 @@ class Benchmark(ABC):
     all_datasets: List[str] = []
     benchmark_name: str = ""
     huggingface_dataset_id: str = ""
-    # Whether the dataset's `answer_prefix` is appended to the PROMPT.  It is always used
-    # for scoring.  Appending it primes the model with the final-answer cue, which for a
-    # chain-of-thought benchmark suppresses the reasoning step the prompt asks for; set
-    # False when the upstream benchmark's prompt ends at the question (e.g. LOFT).
+    # Append the dataset's `answer_prefix` to the PROMPT?  It is always used for scoring.
+    # Set False when the upstream benchmark's prompt ends at the question (e.g. LOFT),
+    # where priming the cue would suppress a chain-of-thought step.
     prompt_includes_answer_prefix: bool = True
 
     def __init__(self, subsets_to_run: Optional[List[str]] = None) -> None:
@@ -198,12 +197,9 @@ class Benchmark(ABC):
             # using the first record for getting max new tokens
             max_new_tokens = df_group["max_new_tokens"].iloc[0]
             param_max_new_tokens = generation_kwargs.get("max_new_tokens", sys.maxsize)
-            # Build a per-group dict rather than mutating the caller's.  Writing the min
-            # back into `generation_kwargs` makes the NEXT iteration read the value this
-            # one just wrote, so max_new_tokens ratchets monotonically downward across
-            # context groups and every group after the smallest one is capped at it.
-            # Benchmarks with per-task limits (longbench, infinite_bench, loogle, ruler)
-            # would silently truncate generation for every later task in a multi-subset run.
+            # Per-group dict, NOT the caller's: writing the min back made the next
+            # iteration read it, ratcheting max_new_tokens down across context groups.
+            # Hit longbench / infinite_bench / loogle / ruler on multi-subset runs.
             group_generation_kwargs = {
                 **generation_kwargs,
                 "max_new_tokens": min(param_max_new_tokens, max_new_tokens),

@@ -146,15 +146,10 @@ def extract_prediction(
     model_output_lines: List[str] = model_output.strip().split("\n")
     preds: List[str] = []
 
-    # Upstream (utils.py:465-478) stops at the FIRST line containing both brackets,
-    # whether or not it parses, and has no further fallback.  Two earlier deviations here
-    # made this strictly more permissive than upstream, and both could only turn an
-    # upstream zero into a non-zero score:
-    #   * `break` inside the `try` -- a line whose literal_eval failed was skipped and
-    #     scanning continued, recovering an answer upstream discards.
-    #   * an "everything after the answer prefix" fallback with no upstream counterpart.
-    # Measured on 470 real LOFT generations, the two together changed 5 predictions, all
-    # in the permissive direction, moving nq_32k subspan_em by +0.02 against upstream.
+    # Upstream (utils.py:465-478) stops at the FIRST bracketed line whether or not it
+    # parses, with no fallback.  Two earlier deviations here (break inside the try, and an
+    # after-the-prefix fallback) were strictly more permissive; on 470 real generations
+    # they changed 5 predictions, all upward, and +0.155 subspan_em on oracle-top-k nq.
     for line in model_output_lines:
         if "[" in line and "]" in line:
             pred_start_index: int = line.find("[")
@@ -163,10 +158,8 @@ def extract_prediction(
             try:
                 pred_as_str = _escape_single_quotes(pred_as_str)
                 parsed = ast.literal_eval(pred_as_str)
-                # Upstream returns literal_eval's value unchanged and relies on its
-                # `convert_to_str` processor to stringify; that raises on a scalar.
-                # Coercing here is the one deliberate difference kept, because it cannot
-                # change a score for the list outputs the prompt asks for.
+                # Deliberate difference: upstream returns the raw value and its
+                # convert_to_str raises on a scalar.  Cannot change a score for lists.
                 if isinstance(parsed, list):
                     preds = [str(p) for p in parsed]
                 else:
@@ -243,12 +236,9 @@ def calculate_metrics(df: pd.DataFrame) -> Dict[str, Any]:
         )
 
         if not pred_answers_raw:
-            # Upstream's no-prediction branch (evaluation/rag.py:80-88) records
-            # em / subspan_em / f1 = 0.0 and does NOT record `coverage`, so
-            # `aggregate_metrics` averages coverage over the PARSED rows only.  Scoring an
-            # unparseable row as coverage 0.0 changes the denominator: on the real
-            # generations that is 70 vs 57 rows for qampari_32k and 70 vs 60 for
-            # quest_32k, i.e. a 17-19% difference on LOFT's primary multi-value metric.
+            # Upstream (rag.py:80-88) records em/subspan_em/f1 = 0.0 here but NOT
+            # coverage, so it averages coverage over PARSED rows only.  Denominator on
+            # real data: 70 vs 57 (qampari), 70 vs 60 (quest).
             all_em_scores.append(0.0)
             all_subspan_em_scores.append(0.0)
             if not is_multi_value:
@@ -285,8 +275,7 @@ def calculate_metrics(df: pd.DataFrame) -> Dict[str, Any]:
     }
 
     if is_multi_value:
-        # Averaged over the PARSED rows, matching upstream; empty means nothing parsed,
-        # where np.mean would return nan.
+        # Over PARSED rows, matching upstream; empty would make np.mean return nan.
         metrics["coverage"] = (
             float(np.mean(all_coverage_scores)) if all_coverage_scores else 0.0
         )
