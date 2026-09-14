@@ -52,6 +52,11 @@ class Benchmark(ABC):
     all_datasets: List[str] = []
     benchmark_name: str = ""
     huggingface_dataset_id: str = ""
+    # Whether the dataset's `answer_prefix` is appended to the PROMPT.  It is always used
+    # for scoring.  Appending it primes the model with the final-answer cue, which for a
+    # chain-of-thought benchmark suppresses the reasoning step the prompt asks for; set
+    # False when the upstream benchmark's prompt ends at the question (e.g. LOFT).
+    prompt_includes_answer_prefix: bool = True
 
     def __init__(self, subsets_to_run: Optional[List[str]] = None) -> None:
         """Initialize benchmark with subset of datasets to run.
@@ -185,15 +190,27 @@ class Benchmark(ABC):
             })
             # Create request using current adapter interface (simplified)
             answer_prefix = df_group["answer_prefix"].iloc[0]
+            if not self.prompt_includes_answer_prefix:
+                # Scoring still uses the dataset's answer_prefix; only the prompt omits it.
+                answer_prefix = ""
             request: Request = Request(context=context, questions=questions, answer_prefix=answer_prefix)
             
             # using the first record for getting max new tokens
             max_new_tokens = df_group["max_new_tokens"].iloc[0]
             param_max_new_tokens = generation_kwargs.get("max_new_tokens", sys.maxsize)
-            generation_kwargs["max_new_tokens"] = min(param_max_new_tokens, max_new_tokens)
-            
+            # Build a per-group dict rather than mutating the caller's.  Writing the min
+            # back into `generation_kwargs` makes the NEXT iteration read the value this
+            # one just wrote, so max_new_tokens ratchets monotonically downward across
+            # context groups and every group after the smallest one is capped at it.
+            # Benchmarks with per-task limits (longbench, infinite_bench, loogle, ruler)
+            # would silently truncate generation for every later task in a multi-subset run.
+            group_generation_kwargs = {
+                **generation_kwargs,
+                "max_new_tokens": min(param_max_new_tokens, max_new_tokens),
+            }
+
             # Process through adapter
-            response: RequestResponse = adapter.process_request(request, generation_kwargs, request_kwargs)
+            response: RequestResponse = adapter.process_request(request, group_generation_kwargs, request_kwargs)
             
             # Assign responses back to DataFrame
             if isinstance(response.responses, list):

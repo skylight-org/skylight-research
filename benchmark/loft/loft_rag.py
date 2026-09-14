@@ -1,7 +1,34 @@
 """LOFT RAG benchmark implementation for long-context retrieval-augmented generation.
 
-This benchmark implements LOFT's RAG evaluation exactly as specified in the LOFT paper,
-ensuring 100% fidelity with LOFT's evaluation methodology and metrics.
+Scope of fidelity to https://github.com/google-deepmind/loft, measured rather than
+assumed (upstream sha 219f68e):
+
+* METRICS -- faithful.  `calculate_metrics` is a transcription of upstream's
+  `evaluation/utils.py` + `evaluation/rag.py`.  Scoring identical model outputs through
+  this module and through upstream's own `RagEvaluation` / `MultiValueRagEvaluation`
+  gives identical em / subspan_em / f1 / coverage on all five datasets and all splits.
+  The multi-value routing (qampari, quest) matches upstream's `multi_value_rag` task
+  type, and `subspan_em` is LOFT's primary RAG metric.
+
+* DATA -- NOT LOFT's.  This benchmark reads the third-party HuggingFace mirror
+  `f20180301/loft-rag-*`, not LOFT's own `download.sh` + `preprocess.py` pipeline.  The
+  mirror's `dev` split IS LOFT's dev split (query text and gold answers match exactly),
+  but it also ships a `test` split of 100 (60 for qampari/quest) queries that appear in
+  no LOFT query file, against a corpus ~1.45x the size of LOFT's.  LOFT's public 32k RAG
+  benchmark is the 10 dev queries per dataset; `overall` below pools both splits, so it
+  is NOT comparable to a published LOFT number.  Use `by_split["dev"]` for that.
+  Known mirror defect: for qampari and quest the corpus contains NONE of the gold
+  documents for LOFT's dev queries (0/50 and 0/24 by qrels), so those dev scores are
+  floored at 0 by the data, not by the model.
+
+* PROMPT -- LOFT's corpus instruction, formatting instruction, `ID | TITLE | CONTENT`
+  echo format, five few-shot examples with chain-of-thought, and query separators are all
+  present in the mirror and match upstream's `prompts/`.
+
+* CONTEXT LENGTH -- the "32k" label is LOFT's, measured with Gemini's tokenizer.  These
+  contexts are 42-46k tokens under Llama-3.1's tokenizer, so a `max_context_length` of
+  32768 silently truncates ~25-30% of the corpus, gold passages included.  Set it from
+  the tokenizer you are actually running.
 """
 
 from typing import Any, Dict, List
@@ -58,6 +85,13 @@ class LoftRag(Benchmark):
 
     benchmark_name: str = "loft_rag"
     huggingface_dataset_id: str = "f20180301/rag"
+    # LOFT's rendered prompt ends at the query; the model is expected to emit the
+    # TITLE/ID reasoning step and THEN "Final Answer: [...]" (FINAL_ANSWER_FORMAT renders
+    # only the few-shot examples).  Appending the prefix to the prompt primes the answer
+    # and suppresses the chain-of-thought this prompt type is built around -- measured on
+    # Llama-3.1-8B-Instruct at 32k, that costs +0.036 / +0.064 / +0.072 subspan_em on
+    # nq / hotpotqa / qampari.  The prefix is still used for scoring.
+    prompt_includes_answer_prefix: bool = False
 
     def _load_datasets(self) -> pd.DataFrame:
         """Load LOFT RAG datasets from HuggingFace Hub.
@@ -197,6 +231,36 @@ class LoftRag(Benchmark):
             k: round(v, 4) if isinstance(v, float) else v
             for k, v in overall_metrics["overall"].items()
         }
+
+        # `overall` above pools the mirror's dev and test splits.  Only `dev` is LOFT's
+        # published benchmark (its 10 queries per dataset match LOFT's dev_queries.jsonl
+        # exactly); `test` is an extra 100/60 queries present in no LOFT query file.  With
+        # 91% of the pooled rows coming from `test`, the pooled number is not comparable
+        # to a published LOFT result, so expose the per-split breakdown alongside it
+        # rather than only the pooled figure.
+        if "split" in results_df.columns:
+            by_split: Dict[str, Dict[str, Any]] = {}
+            for split_name, split_df in results_df.groupby("split"):
+                per_task: Dict[str, Dict[str, float]] = {}
+                for task_name, task_df in split_df.groupby("task"):
+                    split_metrics = calculate_metrics(task_df)
+                    if "error" in split_metrics:
+                        continue
+                    per_task[str(task_name)] = {
+                        k: round(v, 4) if isinstance(v, float) else v
+                        for k, v in split_metrics.items()
+                    }
+                if not per_task:
+                    continue
+                agg: Dict[str, Any] = {"n_samples": int(len(split_df))}
+                for key in ("em", "subspan_em", "f1", "coverage"):
+                    vals = [m[key] for m in per_task.values() if key in m]
+                    if vals:
+                        agg[key] = round(float(sum(vals) / len(vals)), 4)
+                by_split[str(split_name)] = {"overall": agg, "task_metrics": per_task}
+            if by_split:
+                overall_metrics["by_split"] = by_split
+                overall_metrics["summary"]["loft_comparable_split"] = "dev"
 
         return overall_metrics
 
