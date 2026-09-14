@@ -10,16 +10,23 @@ assumed (upstream sha 219f68e):
   The multi-value routing (qampari, quest) matches upstream's `multi_value_rag` task
   type, and `subspan_em` is LOFT's primary RAG metric.
 
-* DATA -- NOT LOFT's.  This benchmark reads the third-party HuggingFace mirror
-  `f20180301/loft-rag-*`, not LOFT's own `download.sh` + `preprocess.py` pipeline.  The
-  mirror's `dev` split IS LOFT's dev split (query text and gold answers match exactly),
-  but it also ships a `test` split of 100 (60 for qampari/quest) queries that appear in
-  no LOFT query file, against a corpus ~1.45x the size of LOFT's.  LOFT's public 32k RAG
-  benchmark is the 10 dev queries per dataset; `overall` below pools both splits, so it
-  is NOT comparable to a published LOFT number.  Use `by_split["dev"]` for that.
+* DATA -- a re-mix of LOFT's, not LOFT's own.  This benchmark reads the third-party
+  HuggingFace mirror `f20180301/loft-rag-*`, not LOFT's `download.sh` + `preprocess.py`
+  output.  What the `*_32k` subsets actually contain:
+    - `dev` (10 rows) IS LOFT's 32k dev split: query text and gold answers match
+      `rag/<ds>/32k/dev_queries.jsonl` exactly, 10/10 on all five datasets.
+    - `test` (100 rows; 60 for qampari/quest) is LOFT's **128k** test split -- every
+      query matches `rag/<ds>/128k/test_queries.jsonl` -- placed against a 32k-labelled
+      corpus.  LOFT ships `test_queries.jsonl` only at 128k and 1m; there is no 32k test
+      split upstream.  qampari and quest keep only 60 of those 100 queries.
+    - the rendered corpus holds ~1.45x the documents of LOFT's 32k corpus (e.g. nq 309
+      vs 214), presumably to support the imported 128k queries.
+  So `overall` below pools LOFT's 32k dev with LOFT's 128k test at a third context
+  length, and 91% of the rows are the latter.  It is NOT comparable to any published
+  LOFT number; use `by_split["dev"]` for the closest thing to one.
   Known mirror defect: for qampari and quest the corpus contains NONE of the gold
   documents for LOFT's dev queries (0/50 and 0/24 by qrels), so those dev scores are
-  floored at 0 by the data, not by the model.
+  floored at 0 by the data rather than by the model.
 
 * PROMPT -- LOFT's corpus instruction, formatting instruction, `ID | TITLE | CONTENT`
   echo format, five few-shot examples with chain-of-thought, and query separators are all

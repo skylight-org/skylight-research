@@ -146,6 +146,15 @@ def extract_prediction(
     model_output_lines: List[str] = model_output.strip().split("\n")
     preds: List[str] = []
 
+    # Upstream (utils.py:465-478) stops at the FIRST line containing both brackets,
+    # whether or not it parses, and has no further fallback.  Two earlier deviations here
+    # made this strictly more permissive than upstream, and both could only turn an
+    # upstream zero into a non-zero score:
+    #   * `break` inside the `try` -- a line whose literal_eval failed was skipped and
+    #     scanning continued, recovering an answer upstream discards.
+    #   * an "everything after the answer prefix" fallback with no upstream counterpart.
+    # Measured on 470 real LOFT generations, the two together changed 5 predictions, all
+    # in the permissive direction, moving nq_32k subspan_em by +0.02 against upstream.
     for line in model_output_lines:
         if "[" in line and "]" in line:
             pred_start_index: int = line.find("[")
@@ -154,23 +163,17 @@ def extract_prediction(
             try:
                 pred_as_str = _escape_single_quotes(pred_as_str)
                 parsed = ast.literal_eval(pred_as_str)
+                # Upstream returns literal_eval's value unchanged and relies on its
+                # `convert_to_str` processor to stringify; that raises on a scalar.
+                # Coercing here is the one deliberate difference kept, because it cannot
+                # change a score for the list outputs the prompt asks for.
                 if isinstance(parsed, list):
                     preds = [str(p) for p in parsed]
                 else:
                     preds = [str(parsed)]
-                break
             except Exception:
                 pass
-
-    if not preds:
-        for line in model_output_lines:
-            if answer_prefix.lower() in line.lower():
-                prefix_idx: int = line.lower().find(answer_prefix.lower())
-                after_prefix: str = line[prefix_idx + len(answer_prefix) :].strip()
-                after_prefix = after_prefix.lstrip(":").strip()
-                if after_prefix:
-                    preds = [after_prefix]
-                break
+            break
 
     return preds
 
@@ -240,11 +243,15 @@ def calculate_metrics(df: pd.DataFrame) -> Dict[str, Any]:
         )
 
         if not pred_answers_raw:
+            # Upstream's no-prediction branch (evaluation/rag.py:80-88) records
+            # em / subspan_em / f1 = 0.0 and does NOT record `coverage`, so
+            # `aggregate_metrics` averages coverage over the PARSED rows only.  Scoring an
+            # unparseable row as coverage 0.0 changes the denominator: on the real
+            # generations that is 70 vs 57 rows for qampari_32k and 70 vs 60 for
+            # quest_32k, i.e. a 17-19% difference on LOFT's primary multi-value metric.
             all_em_scores.append(0.0)
             all_subspan_em_scores.append(0.0)
-            if is_multi_value:
-                all_coverage_scores.append(0.0)
-            else:
+            if not is_multi_value:
                 all_f1_scores.append(0.0)
             continue
 
@@ -278,7 +285,12 @@ def calculate_metrics(df: pd.DataFrame) -> Dict[str, Any]:
     }
 
     if is_multi_value:
-        metrics["coverage"] = float(np.mean(all_coverage_scores))
+        # Averaged over the PARSED rows, matching upstream; empty means nothing parsed,
+        # where np.mean would return nan.
+        metrics["coverage"] = (
+            float(np.mean(all_coverage_scores)) if all_coverage_scores else 0.0
+        )
+        metrics["num_scored_for_coverage"] = len(all_coverage_scores)
     else:
         metrics["f1"] = float(np.mean(all_f1_scores))
 

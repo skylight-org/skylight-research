@@ -140,3 +140,63 @@ class TestPromptAnswerPrefix:
         df = pd.DataFrame([_row("nq_32k", "dev", "Final Answer: ['Paris']", ["Paris"])])
         assert df["answer_prefix"].iloc[0] == "Final Answer: "
         assert calculate_metrics(df)["em"] == 1.0
+
+
+class TestUpstreamParityOfExtractPrediction:
+    """`extract_prediction` must not be more permissive than upstream.
+
+    Upstream (loft/utils.py:465-478) stops at the FIRST line containing both brackets,
+    whether or not it parses, and has no answer-prefix fallback.  Both of this repo's
+    former deviations could only turn an upstream 0 into a non-zero score.
+    """
+
+    def test_stops_at_first_bracketed_line_even_if_it_fails_to_parse(self):
+        # First bracketed line is unparseable; upstream returns [] and so must we,
+        # rather than scanning on and recovering the second line's answer.
+        out = "Final Answer: [Randolph County, Illinois]\nFinal Answer: ['Chicago']"
+        assert extract_prediction(out) == []
+
+    def test_no_answer_prefix_fallback(self):
+        # No brackets anywhere: upstream returns [], regardless of the prefix appearing.
+        assert extract_prediction("Final Answer: Tyrion Lannister") == []
+
+    def test_well_formed_output_is_unaffected(self):
+        out = "TITLE: X | ID: 3\nFinal Answer: ['Tyrion Lannister']"
+        assert extract_prediction(out) == ["Tyrion Lannister"]
+
+    def test_empty_prefix_cannot_swallow_the_whole_line(self):
+        # Guards the fix that was NOT taken: blanking answer_prefix used to make the
+        # fallback match every line and return the entire first line as the prediction.
+        out = "The answer is the following day, based on document ID 7."
+        assert extract_prediction(out, "") == []
+
+
+class TestCoverageDenominator:
+    """Coverage averages over PARSED rows, as upstream's aggregate_metrics does."""
+
+    def test_unparseable_rows_are_excluded_from_coverage(self):
+        rows = [
+            _row("qampari_32k", "dev", "Final Answer: ['a', 'b']", ["a", "b"]),
+            _row("qampari_32k", "dev", "I cannot answer that.", ["c", "d"]),
+        ]
+        m = calculate_metrics(pd.DataFrame(rows))
+        # 1 parsed row with perfect coverage -> 1.0, not 0.5.
+        assert m["coverage"] == 1.0
+        assert m["num_scored_for_coverage"] == 1
+        # em / subspan_em still count the unparseable row as a miss.
+        assert m["em"] == 0.5
+        assert m["num_samples"] == 2
+
+    def test_all_unparseable_yields_zero_not_nan(self):
+        rows = [_row("quest_32k", "dev", "no idea", ["a"])] * 2
+        m = calculate_metrics(pd.DataFrame(rows))
+        assert m["coverage"] == 0.0
+        assert m["num_scored_for_coverage"] == 0
+
+    def test_single_value_f1_still_counts_every_row(self):
+        rows = [
+            _row("nq_32k", "dev", "Final Answer: ['Paris']", ["Paris"]),
+            _row("nq_32k", "dev", "no idea", ["Rome"]),
+        ]
+        m = calculate_metrics(pd.DataFrame(rows))
+        assert m["f1"] == 0.5  # unparseable row contributes 0.0, denominator 2
