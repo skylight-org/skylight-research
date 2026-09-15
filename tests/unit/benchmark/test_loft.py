@@ -61,6 +61,38 @@ class TestCalculateMetrics:
         assert m["em"] == 1.0 and m["subspan_em"] == 1.0
         assert "f1" in m and "coverage" not in m
 
+    def test_multi_value_emits_f1_when_a_row_fails_to_parse(self):
+        # Upstream's MultiValueRagEvaluation appends f1=0.0 on an unparseable row, so its
+        # aggregate carries f1 for multi-value tasks too -- absent only when all parsed.
+        rows = [
+            _row("quest_32k", "test", "Final Answer: ['a']", ["a"]),
+            _row("quest_32k", "test", "no idea", ["b"]),
+        ]
+        m = calculate_metrics(pd.DataFrame(rows))
+        assert m["f1"] == 0.0
+        all_parsed = calculate_metrics(pd.DataFrame([rows[0]]))
+        assert "f1" not in all_parsed
+
+    def test_tuple_of_lists_is_iterated_like_upstream(self):
+        # literal_eval on a "[...]"-delimited slice yields a TUPLE when the line holds
+        # several lists.  Upstream returns that tuple raw and convert_to_str stringifies
+        # each element, so two lists become two predictions -- verified against upstream's
+        # own extract_prediction + convert_to_str, which return exactly this.
+        # Wrapping the tuple whole instead scored differently in both directions.
+        from benchmark.loft.calculate_metrics import extract_prediction
+        assert extract_prediction("Final Answer: ['a'], ['b']", "final answer: ") == [
+            "['a']",
+            "['b']",
+        ]
+
+    def test_parsed_elements_are_str_converted(self):
+        # Upstream's convert_to_str; fires on real rows whose list holds an int.
+        from benchmark.loft.calculate_metrics import extract_prediction
+        assert extract_prediction("Final Answer: ['Physical', 483]", "final answer: ") == [
+            "Physical",
+            "483",
+        ]
+
     def test_multi_value_emits_coverage_not_f1(self):
         df = pd.DataFrame(
             [_row("qampari_32k", "dev", "Final Answer: ['a', 'b']", ["a", "b"])]
@@ -114,7 +146,7 @@ class TestPerSplitReporting:
 
     def test_names_the_loft_comparable_split(self):
         out = LoftRag(["nq_32k"]).post_run_evaluate(self._mixed_df())
-        assert out["summary"]["loft_comparable_split"] == "dev"
+        assert out["summary"]["loft_comparable_split"] == "test"
 
     def test_absent_split_column_is_tolerated(self):
         df = self._mixed_df().drop(columns=["split"])
@@ -187,11 +219,15 @@ class TestCoverageDenominator:
         assert m["em"] == 0.5
         assert m["num_samples"] == 2
 
-    def test_all_unparseable_yields_zero_not_nan(self):
+    def test_all_unparseable_omits_coverage_as_upstream_does(self):
+        # Upstream aggregates each metric over the list it appended to, so a metric that
+        # was never appended is ABSENT.  Reporting 0.0 instead would fold a value into
+        # post_run_evaluate's macro average where upstream contributes nothing.
         rows = [_row("quest_32k", "dev", "no idea", ["a"])] * 2
         m = calculate_metrics(pd.DataFrame(rows))
-        assert m["coverage"] == 0.0
+        assert "coverage" not in m
         assert m["num_scored_for_coverage"] == 0
+        assert m["em"] == 0.0 and m["subspan_em"] == 0.0
 
     def test_single_value_f1_still_counts_every_row(self):
         rows = [

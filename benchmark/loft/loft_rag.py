@@ -5,17 +5,29 @@ Fidelity to https://github.com/google-deepmind/loft (sha 219f68e), measured:
 * METRICS are faithful -- scoring identical outputs through this module and through
   upstream's RagEvaluation / MultiValueRagEvaluation gives identical results.
 * DATA is a third-party mirror (`f20180301/loft-rag-*`), not LOFT's download.sh +
-  preprocess.py output.  `dev` is LOFT's 32k dev split (10 rows, matches exactly);
-  `test` is LOFT's *128k* test split (100 rows; qampari/quest keep only 60), against a
-  corpus ~1.45x LOFT's 32k one.  So `overall` pools two lengths and is not comparable to
-  a published LOFT number -- use `by_split["dev"]`.
-  For qampari/quest the corpus holds none of the gold documents for LOFT's dev queries
-  (0/50, 0/24 by qrels), so those dev scores are floored at 0 by the data.
+  preprocess.py output, but it carries LOFT's own queries.  Verified against upstream's
+  evaluation/example_predictions/rag_nq/queries.jsonl: all 10 of those test qids appear
+  in the mirror's `test` split with identical gold answers, and none in `dev`.
+  `dev` and `test` share ONE corpus (dev[0].context == test[0].context for all ten
+  mirrors), and that corpus sits inside LOFT's own 32k budget measured LOFT's way
+  (len(text.split(" ")): 29.8k-30.2k <= 32000).  So `overall` does NOT pool two lengths.
+  The corpus is selected around the TEST queries, so dev golds are largely absent from
+  it -- qampari 1/50 and quest 0/23 gold strings occur verbatim, against test 281/301
+  and 117/117 -- which floors those dev scores at 0 for reasons of data, not model.
+  `test` is therefore both the LOFT-comparable split and the larger one (100 rows; 60
+  for qampari/quest at 32k) -- use `by_split["test"]`.
 * CONTEXT LENGTH: "32k" is Gemini-tokenized; these are 42-46k Llama tokens, so
   max_context_length=32768 silently drops ~25-30% of the corpus.
-* GENERATION: rows carry max_new_tokens=256 and base.py takes min(caller, row), so that
-  is a hard ceiling.  Upstream imposes no cap.  Left at 256: it binds on ~11% of rows,
-  but raising it to 512 recovered only 6 of 49 (parsed answers finish by token 238).
+* GENERATION: upstream imposes NO output cap (VertexAIModel.infer sets only
+  temperature/top_p).  The mirror rows carry max_new_tokens=256, which base.py turns
+  into a ceiling no caller can raise.  With LOFT's chain-of-thought prompt restored
+  (prompt_includes_answer_prefix=False) outputs grew ~4x and 256 began truncating half
+  the sparse-attention rows before they reach "Final Answer" -- 231/470 rows at the cap
+  and 174 unparseable on oracle-top-k 32k, versus 54/49 dense.  `_load_datasets` now
+  drops the column so the caller's budget governs, matching upstream.
+* PROMPT: upstream sends Gemini a raw prompt; this harness applies the model's chat
+  template (unavoidable for an Instruct model), which inserts a system turn before the
+  corpus and an assistant header after the query.  Deliberate, documented deviation.
 """
 
 from typing import Any, Dict, List
@@ -136,6 +148,13 @@ class LoftRag(Benchmark):
         if missing_columns:
             raise ValueError(f"Missing required columns: {missing_columns}")
 
+        # Upstream imposes no output cap.  base.py takes min(caller, row), so leaving the
+        # mirror's max_new_tokens=256 in place makes it a ceiling no caller can raise --
+        # which truncates ~half the sparse-attention rows before they emit "Final Answer"
+        # once LOFT's chain-of-thought prompt is restored.  Drop it and let the caller's
+        # generation_kwargs govern, as upstream does.
+        combined_df = combined_df.drop(columns=["max_new_tokens"])
+
         return combined_df
 
     def post_run_evaluate(self, results_df: pd.DataFrame) -> Dict[str, Any]:
@@ -240,7 +259,7 @@ class LoftRag(Benchmark):
                 by_split[str(split_name)] = {"overall": agg, "task_metrics": per_task}
             if by_split:
                 overall_metrics["by_split"] = by_split
-                overall_metrics["summary"]["loft_comparable_split"] = "dev"
+                overall_metrics["summary"]["loft_comparable_split"] = "test"
 
         return overall_metrics
 

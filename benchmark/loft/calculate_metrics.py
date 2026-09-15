@@ -158,12 +158,11 @@ def extract_prediction(
             try:
                 pred_as_str = _escape_single_quotes(pred_as_str)
                 parsed = ast.literal_eval(pred_as_str)
-                # Deliberate difference: upstream returns the raw value and its
-                # convert_to_str raises on a scalar.  Cannot change a score for lists.
-                if isinstance(parsed, list):
-                    preds = [str(p) for p in parsed]
-                else:
-                    preds = [str(parsed)]
+                # A slice that starts "[" and ends "]" parses to a list, or to a TUPLE
+                # when the line holds several ("[a], [b]").  Upstream returns the raw
+                # value and convert_to_str iterates it, so the tuple becomes N
+                # predictions; wrapping it whole scored differently in both directions.
+                preds = [str(p) for p in parsed]
             except Exception:
                 pass
             break
@@ -241,8 +240,9 @@ def calculate_metrics(df: pd.DataFrame) -> Dict[str, Any]:
             # real data: 70 vs 57 (qampari), 70 vs 60 (quest).
             all_em_scores.append(0.0)
             all_subspan_em_scores.append(0.0)
-            if not is_multi_value:
-                all_f1_scores.append(0.0)
+            # Upstream (rag.py:80-88) appends f1=0.0 here for BOTH task types, so a
+            # multi-value aggregate carries f1 whenever any row failed to parse.
+            all_f1_scores.append(0.0)
             continue
 
         pred_answers_normalized: List[str] = normalize_answers(pred_answers_raw)
@@ -274,13 +274,13 @@ def calculate_metrics(df: pd.DataFrame) -> Dict[str, Any]:
         "subspan_em": float(np.mean(all_subspan_em_scores)),
     }
 
+    # Upstream's aggregate_metrics averages each metric over the list it actually
+    # appended to, and omits a key whose list stayed empty -- it never substitutes 0.0.
     if is_multi_value:
-        # Over PARSED rows, matching upstream; empty would make np.mean return nan.
-        metrics["coverage"] = (
-            float(np.mean(all_coverage_scores)) if all_coverage_scores else 0.0
-        )
+        if all_coverage_scores:
+            metrics["coverage"] = float(np.mean(all_coverage_scores))
         metrics["num_scored_for_coverage"] = len(all_coverage_scores)
-    else:
+    if all_f1_scores:
         metrics["f1"] = float(np.mean(all_f1_scores))
 
     metrics["num_samples"] = len(df)

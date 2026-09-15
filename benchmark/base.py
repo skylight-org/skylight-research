@@ -194,8 +194,14 @@ class Benchmark(ABC):
                 answer_prefix = ""
             request: Request = Request(context=context, questions=questions, answer_prefix=answer_prefix)
             
-            # using the first record for getting max new tokens
-            max_new_tokens = df_group["max_new_tokens"].iloc[0]
+            # using the first record for getting max new tokens; a benchmark whose
+            # dataset specifies no budget (e.g. LOFT, matching upstream) defers entirely
+            # to the caller's generation_kwargs instead of capping it.
+            max_new_tokens = (
+                df_group["max_new_tokens"].iloc[0]
+                if "max_new_tokens" in df_group.columns
+                else sys.maxsize
+            )
             param_max_new_tokens = generation_kwargs.get("max_new_tokens", sys.maxsize)
             # Per-group dict, NOT the caller's: writing the min back made the next
             # iteration read it, ratcheting max_new_tokens down across context groups.
