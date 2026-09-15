@@ -248,8 +248,21 @@ def pairwise_distance_batched(
     # (b, 1, num_clusters, d)
     B = data2.unsqueeze(1)
 
-    # Broadcasting: (b, n, num_clusters, d)
-    dis = (A - B) ** 2.0
+    # Broadcasting: (b, n, num_clusters, d).
+    #
+    # Squared in place: `(A - B) ** 2.0` keeps the full-size `sub` alive while `pow`
+    # allocates a second tensor of the same shape, and that shape costs
+    # `n_keys * 2**pq_bits * kv_heads * head_dim * 4` bytes -- 1 MiB per context key at
+    # pq_bits=8, and invariant in pq_group_factor.  Holding two is 128 GiB at a 64k
+    # context, which does not fit beside the model and a long KV cache.
+    #
+    # This is exact, not merely equivalent: `pow_.Scalar` and `pow.Tensor_Scalar`
+    # resolve to the same structured implementation, the op is elementwise, and
+    # `sum(dim=-1)` below still sees a tensor of the same shape and alignment.
+    # One contract change: all-integer inputs now raise instead of promoting to float.
+    # `kmeans_batched` upcasts X to fp32 before the loop, so it cannot reach that.
+    dis = A - B
+    dis.pow_(2.0)
 
     # Sum over feature dimension: (b, n, num_clusters)
     dis = dis.sum(dim=-1)
@@ -352,12 +365,25 @@ def kmeans_batched(
         # Assign each sample to nearest cluster: (b, n)
         choice_cluster = torch.argmin(dis, dim=2)
 
+        # Loop locals outlive the iteration, so without these the previous iteration's
+        # tensors are still alive when the next ones are allocated.  `mask_expanded` is
+        # a view of `mask`; dropping only `mask` would free nothing.
+        del dis
+
         # Store previous state for convergence check
         initial_state_pre = initial_state.clone()
 
-        # Update cluster centers using vectorized one-hot masking
-        # Create one-hot encoded mask: (b, n, num_clusters)
-        mask = torch.nn.functional.one_hot(choice_cluster, num_clusters).float()
+        # Update cluster centers using vectorized one-hot masking.
+        # Create one-hot encoded mask: (b, n, num_clusters).
+        #
+        # Scattering into zeros gives the same exact 0.0/1.0 values in the same
+        # contiguous layout as `one_hot(choice_cluster, num_clusters).float()`, without
+        # the int64 tensor one_hot materialises first (4 GiB at a 64k context).  X is
+        # already fp32 here, which is what makes `dtype=X.dtype` equal to `.float()`.
+        # One index per (b, n) row, so `scatter_` is deterministic (`scatter_add_`
+        # would not be).
+        mask = torch.zeros((b, n, num_clusters), dtype=X.dtype, device=X.device)
+        mask.scatter_(2, choice_cluster.unsqueeze(-1), 1.0)
 
         # Expand X to include cluster dimension: (b, n, 1, d)
         X_expanded = X.unsqueeze(2)
@@ -370,6 +396,7 @@ def kmeans_batched(
 
         # Count points per cluster: (b, num_clusters)
         cluster_counts = mask.sum(dim=1)
+        del mask, mask_expanded
 
         # Identify empty clusters
         empty_clusters = cluster_counts == 0  # (b, num_clusters)
