@@ -146,6 +146,10 @@ def extract_prediction(
     model_output_lines: List[str] = model_output.strip().split("\n")
     preds: List[str] = []
 
+    # Upstream (utils.py:465-478) stops at the FIRST bracketed line whether or not it
+    # parses, with no fallback.  Two earlier deviations here (break inside the try, and an
+    # after-the-prefix fallback) were strictly more permissive; on 470 real generations
+    # they changed 5 predictions, all upward, and +0.155 subspan_em on oracle-top-k nq.
     for line in model_output_lines:
         if "[" in line and "]" in line:
             pred_start_index: int = line.find("[")
@@ -154,23 +158,14 @@ def extract_prediction(
             try:
                 pred_as_str = _escape_single_quotes(pred_as_str)
                 parsed = ast.literal_eval(pred_as_str)
-                if isinstance(parsed, list):
-                    preds = [str(p) for p in parsed]
-                else:
-                    preds = [str(parsed)]
-                break
+                # A slice that starts "[" and ends "]" parses to a list, or to a TUPLE
+                # when the line holds several ("[a], [b]").  Upstream returns the raw
+                # value and convert_to_str iterates it, so the tuple becomes N
+                # predictions; wrapping it whole scored differently in both directions.
+                preds = [str(p) for p in parsed]
             except Exception:
                 pass
-
-    if not preds:
-        for line in model_output_lines:
-            if answer_prefix.lower() in line.lower():
-                prefix_idx: int = line.lower().find(answer_prefix.lower())
-                after_prefix: str = line[prefix_idx + len(answer_prefix) :].strip()
-                after_prefix = after_prefix.lstrip(":").strip()
-                if after_prefix:
-                    preds = [after_prefix]
-                break
+            break
 
     return preds
 
@@ -240,12 +235,14 @@ def calculate_metrics(df: pd.DataFrame) -> Dict[str, Any]:
         )
 
         if not pred_answers_raw:
+            # Upstream (rag.py:80-88) records em/subspan_em/f1 = 0.0 here but NOT
+            # coverage, so it averages coverage over PARSED rows only.  Denominator on
+            # real data: 70 vs 57 (qampari), 70 vs 60 (quest).
             all_em_scores.append(0.0)
             all_subspan_em_scores.append(0.0)
-            if is_multi_value:
-                all_coverage_scores.append(0.0)
-            else:
-                all_f1_scores.append(0.0)
+            # Upstream (rag.py:80-88) appends f1=0.0 here for BOTH task types, so a
+            # multi-value aggregate carries f1 whenever any row failed to parse.
+            all_f1_scores.append(0.0)
             continue
 
         pred_answers_normalized: List[str] = normalize_answers(pred_answers_raw)
@@ -277,9 +274,13 @@ def calculate_metrics(df: pd.DataFrame) -> Dict[str, Any]:
         "subspan_em": float(np.mean(all_subspan_em_scores)),
     }
 
+    # Upstream's aggregate_metrics averages each metric over the list it actually
+    # appended to, and omits a key whose list stayed empty -- it never substitutes 0.0.
     if is_multi_value:
-        metrics["coverage"] = float(np.mean(all_coverage_scores))
-    else:
+        if all_coverage_scores:
+            metrics["coverage"] = float(np.mean(all_coverage_scores))
+        metrics["num_scored_for_coverage"] = len(all_coverage_scores)
+    if all_f1_scores:
         metrics["f1"] = float(np.mean(all_f1_scores))
 
     metrics["num_samples"] = len(df)

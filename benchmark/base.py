@@ -52,6 +52,10 @@ class Benchmark(ABC):
     all_datasets: List[str] = []
     benchmark_name: str = ""
     huggingface_dataset_id: str = ""
+    # Append the dataset's `answer_prefix` to the PROMPT?  It is always used for scoring.
+    # Set False when the upstream benchmark's prompt ends at the question (e.g. LOFT),
+    # where priming the cue would suppress a chain-of-thought step.
+    prompt_includes_answer_prefix: bool = True
 
     def __init__(self, subsets_to_run: Optional[List[str]] = None) -> None:
         """Initialize benchmark with subset of datasets to run.
@@ -185,15 +189,30 @@ class Benchmark(ABC):
             })
             # Create request using current adapter interface (simplified)
             answer_prefix = df_group["answer_prefix"].iloc[0]
+            if not self.prompt_includes_answer_prefix:
+                # Scoring still uses the dataset's answer_prefix; only the prompt omits it.
+                answer_prefix = ""
             request: Request = Request(context=context, questions=questions, answer_prefix=answer_prefix)
             
-            # using the first record for getting max new tokens
-            max_new_tokens = df_group["max_new_tokens"].iloc[0]
+            # using the first record for getting max new tokens; a benchmark whose
+            # dataset specifies no budget (e.g. LOFT, matching upstream) defers entirely
+            # to the caller's generation_kwargs instead of capping it.
+            max_new_tokens = (
+                df_group["max_new_tokens"].iloc[0]
+                if "max_new_tokens" in df_group.columns
+                else sys.maxsize
+            )
             param_max_new_tokens = generation_kwargs.get("max_new_tokens", sys.maxsize)
-            generation_kwargs["max_new_tokens"] = min(param_max_new_tokens, max_new_tokens)
-            
+            # Per-group dict, NOT the caller's: writing the min back made the next
+            # iteration read it, ratcheting max_new_tokens down across context groups.
+            # Hit longbench / infinite_bench / loogle / ruler on multi-subset runs.
+            group_generation_kwargs = {
+                **generation_kwargs,
+                "max_new_tokens": min(param_max_new_tokens, max_new_tokens),
+            }
+
             # Process through adapter
-            response: RequestResponse = adapter.process_request(request, generation_kwargs, request_kwargs)
+            response: RequestResponse = adapter.process_request(request, group_generation_kwargs, request_kwargs)
             
             # Assign responses back to DataFrame
             if isinstance(response.responses, list):

@@ -271,3 +271,149 @@ class TestBenchmarkBase:
 
             # Should call empty_cache for each context group
             assert mock_torch.cuda.empty_cache.called
+
+
+class TestGenerationKwargsIsolation:
+    """`_process_all_requests` must not mutate the caller's generation_kwargs.
+
+    It used to write the per-group minimum back into the shared dict, so the next
+    iteration read the value the previous one had written and max_new_tokens ratcheted
+    monotonically downward across context groups.  Benchmarks that carry per-task limits
+    (longbench, infinite_bench, loogle, ruler) would silently truncate generation for
+    every task after the shortest one in a multi-subset run.
+    """
+
+    @staticmethod
+    def _df_with_varying_max_new_tokens() -> pd.DataFrame:
+        # groupby("context") sorts by the context string, so "A" (32) is processed before
+        # "B" (512): exactly the order that used to cap B at 32.
+        return pd.DataFrame(
+            {
+                "context": ["A", "B", "C"],
+                "question": ["qa", "qb", "qc"],
+                "task": ["t", "t", "t"],
+                "answers": [["a"], ["b"], ["c"]],
+                "answer_prefix": ["Answer: "] * 3,
+                "max_new_tokens": [32, 512, 256],
+            }
+        )
+
+    @staticmethod
+    def _recording_adapter(seen: Dict[str, int]) -> Mock:
+        adapter = Mock()
+
+        def process(request, generation_kwargs, request_kwargs):
+            seen[request.context] = generation_kwargs["max_new_tokens"]
+            return Mock(responses=[f"r-{q}" for q in request.questions])
+
+        adapter.process_request.side_effect = process
+        return adapter
+
+    def test_per_group_max_new_tokens_does_not_ratchet(self):
+        seen: Dict[str, int] = {}
+        benchmark = MockBenchmark()
+        benchmark._process_all_requests(
+            self._recording_adapter(seen),
+            self._df_with_varying_max_new_tokens(),
+            {},
+            {},
+        )
+        # Each group must get its OWN row value, not the running minimum.
+        assert seen == {"A": 32, "B": 512, "C": 256}
+
+    def test_caller_generation_kwargs_not_mutated(self):
+        seen: Dict[str, int] = {}
+        caller_kwargs: Dict[str, Any] = {"temperature": 0.0}
+        benchmark = MockBenchmark()
+        benchmark._process_all_requests(
+            self._recording_adapter(seen),
+            self._df_with_varying_max_new_tokens(),
+            caller_kwargs,
+            {},
+        )
+        # The caller's dict must come back exactly as it was handed in.
+        assert caller_kwargs == {"temperature": 0.0}
+
+    def test_explicit_cap_still_applies_to_every_group(self):
+        seen: Dict[str, int] = {}
+        benchmark = MockBenchmark()
+        benchmark._process_all_requests(
+            self._recording_adapter(seen),
+            self._df_with_varying_max_new_tokens(),
+            {"max_new_tokens": 64},
+            {},
+        )
+        # An explicit budget still caps each group: min(64, row value), per group.
+        assert seen == {"A": 32, "B": 64, "C": 64}
+
+    def test_other_generation_kwargs_are_forwarded(self):
+        forwarded: Dict[str, Any] = {}
+        adapter = Mock()
+
+        def process(request, generation_kwargs, request_kwargs):
+            forwarded.update(generation_kwargs)
+            return Mock(responses=[f"r-{q}" for q in request.questions])
+
+        adapter.process_request.side_effect = process
+        MockBenchmark()._process_all_requests(
+            adapter,
+            self._df_with_varying_max_new_tokens(),
+            {"temperature": 0.7, "do_sample": True},
+            {},
+        )
+        assert forwarded["temperature"] == 0.7
+        assert forwarded["do_sample"] is True
+
+    def test_absent_max_new_tokens_column_defers_to_the_caller(self):
+        # A benchmark whose dataset specifies no per-row budget (LOFT, matching upstream,
+        # which imposes no output cap) must let the caller's value through unchanged
+        # rather than KeyError or silently cap.
+        seen: Dict[str, int] = {}
+        df = self._df_with_varying_max_new_tokens().drop(columns=["max_new_tokens"])
+        MockBenchmark()._process_all_requests(
+            self._recording_adapter(seen), df, {"max_new_tokens": 1024}, {}
+        )
+        assert set(seen.values()) == {1024}
+
+
+class TestPromptAnswerPrefixHook:
+    """The prompt fix must be pinned at the call site, not only as a class constant."""
+
+    @staticmethod
+    def _df() -> pd.DataFrame:
+        return pd.DataFrame(
+            {
+                "context": ["C"],
+                "question": ["Q"],
+                "task": ["test_task1"],
+                "answers": [["A"]],
+                "answer_prefix": ["Final Answer: "],
+                "max_new_tokens": [16],
+            }
+        )
+
+    @staticmethod
+    def _capture(store: Dict[str, Any]) -> Mock:
+        adapter = Mock()
+
+        def process(request, generation_kwargs, request_kwargs):
+            store["answer_prefix"] = request.answer_prefix
+            return Mock(responses=["r"])
+
+        adapter.process_request.side_effect = process
+        return adapter
+
+    def test_prompt_prefix_is_blanked_on_the_request_when_disabled(self):
+        class NoPrefix(MockBenchmark):
+            prompt_includes_answer_prefix = False
+
+        store: Dict[str, Any] = {}
+        NoPrefix()._process_all_requests(self._capture(store), self._df(), {}, {})
+        # Deleting the base.py hook would leave "Final Answer: " here and silently
+        # re-prime the prompt, suppressing LOFT's chain-of-thought step.
+        assert store["answer_prefix"] == ""
+
+    def test_prompt_prefix_is_passed_through_by_default(self):
+        store: Dict[str, Any] = {}
+        MockBenchmark()._process_all_requests(self._capture(store), self._df(), {}, {})
+        assert store["answer_prefix"] == "Final Answer: "
