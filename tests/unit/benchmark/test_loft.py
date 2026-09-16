@@ -82,6 +82,7 @@ class TestCalculateMetrics:
         # own extract_prediction + convert_to_str, which return exactly this.
         # Wrapping the tuple whole instead scored differently in both directions.
         from benchmark.loft.calculate_metrics import extract_prediction
+
         assert extract_prediction("Final Answer: ['a'], ['b']", "final answer: ") == [
             "['a']",
             "['b']",
@@ -90,7 +91,10 @@ class TestCalculateMetrics:
     def test_parsed_elements_are_str_converted(self):
         # Upstream's convert_to_str; fires on real rows whose list holds an int.
         from benchmark.loft.calculate_metrics import extract_prediction
-        assert extract_prediction("Final Answer: ['Physical', 483]", "final answer: ") == [
+
+        assert extract_prediction(
+            "Final Answer: ['Physical', 483]", "final answer: "
+        ) == [
             "Physical",
             "483",
         ]
