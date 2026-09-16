@@ -2,10 +2,12 @@
 
 The metric functions themselves are a transcription of upstream
 (google-deepmind/loft, `evaluation/utils.py` + `evaluation/rag.py`); these tests pin the
-behaviour that is specific to this repo's wrapper, and in particular that the per-split
-breakdown separates LOFT's own `dev` queries from the HuggingFace mirror's extra `test`
-split.  Pooling the two is not comparable to a published LOFT number, because `test` is
-100 (60 for qampari/quest) queries that appear in no LOFT query file.
+behaviour specific to this repo's wrapper, and in particular the per-split breakdown.
+BOTH splits carry LOFT's own queries against one shared corpus -- verified against
+upstream's evaluation/example_predictions/rag_nq/queries.jsonl, whose 10 test qids all
+appear in the mirror's `test` split with identical golds and none in `dev`.  The corpus is
+selected around the TEST queries, so dev golds are largely absent from it and dev scores
+are floored by the data; `test` is both the LOFT-comparable split and the larger one.
 """
 
 import pandas as pd
@@ -153,6 +155,36 @@ class TestPerSplitReporting:
         out = LoftRag(["nq_32k"]).post_run_evaluate(df)
         assert "by_split" not in out
         assert "overall" in out
+
+
+class TestGenerationBudget:
+    """Upstream imposes no output cap; the dataset column must not become one."""
+
+    def test_load_datasets_drops_the_max_new_tokens_ceiling(self):
+        # base.py takes min(caller, row), so leaving the mirror's 256 in place makes it a
+        # ceiling no caller can raise -- it truncated ~half the sparse rows before they
+        # emitted "Final Answer".  Deleting the drop() was previously invisible here.
+        from unittest.mock import patch
+
+        frame = pd.DataFrame(
+            {
+                "context": ["c"],
+                "question": ["q"],
+                "answers": [["a"]],
+                "answer_prefix": ["Final Answer: "],
+                "max_new_tokens": [256],
+            }
+        )
+
+        class _Split:
+            def to_pandas(self):
+                return frame.copy()
+
+        with patch("datasets.load_dataset", return_value={"test": _Split()}):
+            out = LoftRag(["nq_32k"])._load_datasets()
+        assert "max_new_tokens" not in out.columns
+        for col in ("context", "question", "answers", "answer_prefix", "task"):
+            assert col in out.columns
 
 
 class TestPromptAnswerPrefix:

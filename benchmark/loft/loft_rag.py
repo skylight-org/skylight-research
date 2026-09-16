@@ -187,7 +187,11 @@ class LoftRag(Benchmark):
             all_em_scores.append(metrics["em"])
             all_subspan_em_scores.append(metrics["subspan_em"])
 
-            if "f1" in metrics:
+            # Multi-value f1 exists only to mirror upstream's per-task key: upstream
+            # appends f1 solely in the unparseable branch, so it is 0.0 by construction
+            # and is NOT a measurement.  Upstream has no cross-task macro; folding this
+            # placeholder into ours would deflate overall.f1 (~x0.6) for no model reason.
+            if "f1" in metrics and "coverage" not in metrics:
                 all_f1_scores.append(metrics["f1"])
             if "coverage" in metrics:
                 all_coverage_scores.append(metrics["coverage"])
@@ -235,8 +239,10 @@ class LoftRag(Benchmark):
             for k, v in overall_metrics["overall"].items()
         }
 
-        # `overall` pools dev (LOFT's benchmark) with test (LOFT's 128k split, 91% of
-        # rows), so expose the breakdown rather than only the pooled figure.
+        # `overall` pools LOFT's dev and test splits against one shared corpus.  The
+        # corpus is built around the TEST queries, so dev golds are largely absent from it
+        # and dev scores are floored by the data -- expose the breakdown, and name `test`
+        # (the larger, LOFT-comparable split) rather than reporting only the pooled figure.
         if "split" in results_df.columns:
             by_split: Dict[str, Dict[str, Any]] = {}
             for split_name, split_df in results_df.groupby("split"):
@@ -253,7 +259,12 @@ class LoftRag(Benchmark):
                     continue
                 agg: Dict[str, Any] = {"n_samples": int(len(split_df))}
                 for key in ("em", "subspan_em", "f1", "coverage"):
-                    vals = [m[key] for m in per_task.values() if key in m]
+                    # Skip multi-value's structurally-zero f1, as above.
+                    vals = [
+                        m[key]
+                        for m in per_task.values()
+                        if key in m and not (key == "f1" and "coverage" in m)
+                    ]
                     if vals:
                         agg[key] = round(float(sum(vals) / len(vals)), 4)
                 by_split[str(split_name)] = {"overall": agg, "task_metrics": per_task}
