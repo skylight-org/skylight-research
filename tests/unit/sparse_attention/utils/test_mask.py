@@ -251,6 +251,27 @@ class TestMask:
         assert torch.allclose(ptr, expected_ptr)
         assert torch.allclose(values, expected_values)
 
+    def test_create_from_row_wise_idx_sparse_index_preserves_unique_input_order(self):
+        """Sparse index mode should preserve row-wise order when indices are unique."""
+        shape = (2, 6)
+        row_wise_idx = torch.tensor([[3, 1, 4], [2, 0, 5]])
+        data = torch.tensor([[0.3, 0.1, 0.4], [1.2, 1.0, 1.5]])
+
+        mask = Mask.create_from_row_wise_idx(
+            shape,
+            row_wise_idx,
+            data,
+            mask_type="index",
+            dtype=torch.float32,
+            mode="sparse",
+        )
+
+        indices, ptr, values = mask.get_index_mask()
+
+        torch.testing.assert_close(indices, torch.tensor([3, 1, 4, 8, 6, 11]))
+        torch.testing.assert_close(ptr, torch.tensor([0, 3, 6]))
+        torch.testing.assert_close(values, data.reshape(-1))
+
     def test_create_from_row_wise_idx_single_element(self):
         """Test with single element per row."""
         shape = (3, 4)
@@ -286,6 +307,30 @@ class TestMask:
         dense_mask = mask.get_dense_mask()
         expected = torch.tensor([[1.0, 0.0, 0.5, 0.0, 0.0], [0.0, 0.6, 0.0, 0.0, 0.0]])
         assert torch.allclose(dense_mask, expected)
+
+    def test_create_from_row_wise_idx_sparse_padding_preserves_valid_input_order(self):
+        """Padding mode should filter -1 values without reordering valid entries."""
+        shape = (2, 6)
+        row_wise_idx = torch.tensor([[3, -1, 1, 4], [2, 0, -1, 5]])
+        data = torch.tensor([[0.3, 0.0, 0.1, 0.4], [1.2, 1.0, 0.0, 1.5]])
+
+        mask = Mask.create_from_row_wise_idx(
+            shape,
+            row_wise_idx,
+            data,
+            mask_type="index",
+            dtype=torch.float32,
+            use_padding=True,
+            mode="sparse",
+        )
+
+        indices, ptr, values = mask.get_index_mask()
+
+        torch.testing.assert_close(indices, torch.tensor([3, 1, 4, 8, 6, 11]))
+        torch.testing.assert_close(ptr, torch.tensor([0, 3, 6]))
+        torch.testing.assert_close(
+            values, torch.tensor([0.3, 0.1, 0.4, 1.2, 1.0, 1.5])
+        )
 
     def test_create_from_row_wise_idx_multidimensional(self):
         """Test with multi-dimensional batch shape."""
@@ -1440,3 +1485,28 @@ class TestMask:
 
         print("\n✅ All edge case tests passed!")
         print("=" * 80 + "\n")
+
+    def test_create_from_row_wise_idx_sparse_index_duplicates_keep_last_value(self):
+        """Sparse index mode should match dense scatter_ behavior for duplicates."""
+        shape = (2, 5)
+        row_wise_idx = torch.tensor([[1, 3, 1, 1], [2, 2, 4, 2]])
+        data = torch.tensor([[1.0, 2.0, 3.0, 4.0], [5.0, 6.0, 7.0, 8.0]])
+
+        mask = Mask.create_from_row_wise_idx(
+            shape,
+            row_wise_idx,
+            data,
+            mask_type="index",
+            dtype=torch.float32,
+            mode="sparse",
+        )
+
+        expected = torch.zeros(shape, dtype=torch.float32)
+        expected.scatter_(dim=-1, index=row_wise_idx, src=data)
+
+        indices, ptr, index_data = mask.get_index_mask()
+
+        torch.testing.assert_close(indices, torch.tensor([3, 1, 9, 7]))
+        torch.testing.assert_close(ptr, torch.tensor([0, 2, 4]))
+        torch.testing.assert_close(mask.get_dense_mask(), expected)
+        torch.testing.assert_close(index_data, torch.tensor([2.0, 4.0, 7.0, 8.0]))
