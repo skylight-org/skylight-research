@@ -232,10 +232,19 @@ class Benchmark(ABC):
         if request_kwargs is None:
             request_kwargs = {}
             
-        # Create result directory if it doesn't exist
+        # Validate result directory instead of creating it.
+        # On Windows, a path like '/invalid/path' is root-relative (not fully qualified),
+        # which is ambiguous and should be rejected early.
         result_path: Path = Path(result_dir)
-        result_path.mkdir(parents=True, exist_ok=True)
-        
+        if os.name == "nt" and result_dir.startswith(("/", "\\")) and not result_path.is_absolute():
+            raise FileNotFoundError(
+                f"Invalid Windows path (root-relative, not fully qualified): {result_dir}"
+            )
+
+        if not result_path.exists():
+            raise FileNotFoundError(f"Result directory does not exist: {result_dir}")
+        if not result_path.is_dir():
+            raise NotADirectoryError(f"Result path is not a directory: {result_dir}")
         # Load datasets
         print(f"Loading {self.benchmark_name} datasets: {self.subsets_to_run}")
         dataset_df: pd.DataFrame = self._load_datasets()

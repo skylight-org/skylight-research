@@ -477,20 +477,43 @@ class Mask:
                 ]
             )
         else:
-            # Fast path: No padding handling (zero-sync, assumes all indices are valid)
-            flat_indices_with_offset = flat_row_wise_idx + row_offsets
+            # Fast path: No padding handling.
+            # Deduplicate indices within each row (last occurrence wins, matching scatter_
+            # semantics used by create_from_row_wise_idx_dense) and build ptr from the
+            # actual per-row unique counts to avoid variable-shadowing bugs.
+            unique_indices: list = []
+            unique_values: list = []
+            row_unique_counts: list = []
 
-            # Flatten directly without filtering
-            valid_flat_indices = flat_indices_with_offset.reshape(-1)
-            valid_values = flat_data.reshape(-1)
+            for i in range(batch_size):
+                row_idx = flat_row_wise_idx[i]
+                row_val = flat_data[i]
 
-            # Create uniform ptr array (each row has exactly k elements)
-            ptr = torch.arange(
-                0,
-                batch_size * k + 1,
-                k,
-                dtype=torch.long,
-                device=flat_row_wise_idx.device,
+                seen: dict = {}
+                for j in range(len(row_idx)):
+                    seen[int(row_idx[j])] = row_val[j].item()  # last value wins
+
+                for col_idx, v in seen.items():  # col_idx avoids shadowing outer k
+                    unique_indices.append(i * n + col_idx)
+                    unique_values.append(v)
+                row_unique_counts.append(len(seen))
+
+            valid_flat_indices = torch.tensor(
+                unique_indices, dtype=torch.long, device=flat_row_wise_idx.device
+            )
+            valid_values = torch.tensor(
+                unique_values, dtype=dtype, device=flat_row_wise_idx.device
+            )
+
+            # Build ptr from actual unique counts per row (handles duplicates correctly)
+            counts_tensor = torch.tensor(
+                row_unique_counts, dtype=torch.long, device=flat_row_wise_idx.device
+            )
+            ptr = torch.cat(
+                [
+                    torch.zeros(1, dtype=torch.long, device=flat_row_wise_idx.device),
+                    torch.cumsum(counts_tensor, dim=0),
+                ]
             )
 
         # Create sparse mask
