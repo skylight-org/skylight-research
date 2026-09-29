@@ -61,8 +61,7 @@ class TestCalculateMetrics:
         assert "f1" in m and "coverage" not in m
 
     def test_multi_value_emits_f1_when_a_row_fails_to_parse(self):
-        # Upstream's MultiValueRagEvaluation appends f1=0.0 on an unparseable row, so its
-        # aggregate carries f1 for multi-value tasks too -- absent only when all parsed.
+        # Upstream records f1=0.0 on an unparseable multi-value row.
         rows = [
             _row("quest_32k", "test", "Final Answer: ['a']", ["a"]),
             _row("quest_32k", "test", "no idea", ["b"]),
@@ -73,11 +72,7 @@ class TestCalculateMetrics:
         assert "f1" not in all_parsed
 
     def test_tuple_of_lists_is_iterated_like_upstream(self):
-        # literal_eval on a "[...]"-delimited slice yields a TUPLE when the line holds
-        # several lists.  Upstream returns that tuple raw and convert_to_str stringifies
-        # each element, so two lists become two predictions -- verified against upstream's
-        # own extract_prediction + convert_to_str, which return exactly this.
-        # Wrapping the tuple whole instead scored differently in both directions.
+        # Two lists on one line parse to a tuple; upstream yields one prediction each.
         from benchmark.loft.calculate_metrics import extract_prediction
 
         assert extract_prediction("Final Answer: ['a'], ['b']", "final answer: ") == [
@@ -121,8 +116,7 @@ class TestPerSplitReporting:
 
     @staticmethod
     def _mixed_df() -> pd.DataFrame:
-        # dev: 2 correct of 2.  test: 0 correct of 4.  Pooling gives 1/3, which is
-        # neither number and is what a reader would otherwise quote as "LOFT".
+        # dev: 2/2 correct, test: 0/4 correct.
         rows = [
             _row("nq_32k", "dev", "Final Answer: ['Paris']", ["Paris"]),
             _row("nq_32k", "dev", "Final Answer: ['Rome']", ["Rome"]),
@@ -142,8 +136,6 @@ class TestPerSplitReporting:
 
     def test_pooled_overall_is_still_reported_and_differs_from_dev(self):
         out = LoftRag(["nq_32k"]).post_run_evaluate(self._mixed_df())
-        # 2 of 6 correct when pooled -- distinct from both split values, which is exactly
-        # why the breakdown is needed.
         assert out["overall"]["em"] == round(2 / 6, 4)
         assert out["overall"]["em"] != out["by_split"]["dev"]["overall"]["em"]
 
@@ -162,10 +154,6 @@ class TestGenerationBudget:
     """The row budget is upstream's 8192, never the mirror's 256 nor unbounded."""
 
     def test_load_datasets_replaces_the_256_ceiling_with_upstreams_budget(self):
-        # base.py takes min(caller, row), so leaving the mirror's 256 in place makes it a
-        # ceiling no caller can raise -- it truncated ~half the sparse rows before they
-        # emitted "Final Answer".  Dropping the column instead would leave the adapter's
-        # EOS-only decode loop unbounded; the budget must be gemini-1.5-pro's 8192.
         from unittest.mock import patch
 
         frame = pd.DataFrame(
@@ -201,8 +189,7 @@ class TestPromptAnswerPrefix:
         assert Benchmark.prompt_includes_answer_prefix is True
 
     def test_scoring_still_uses_the_dataset_answer_prefix(self):
-        # Blanking the PROMPT prefix must not blank the PARSE prefix: calculate_metrics
-        # reads it from the dataframe, where it is still "Final Answer: ".
+        # Only the prompt omits the prefix; the parser still reads it from the df.
         df = pd.DataFrame([_row("nq_32k", "dev", "Final Answer: ['Paris']", ["Paris"])])
         assert df["answer_prefix"].iloc[0] == "Final Answer: "
         assert calculate_metrics(df)["em"] == 1.0
@@ -217,8 +204,7 @@ class TestUpstreamParityOfExtractPrediction:
     """
 
     def test_stops_at_first_bracketed_line_even_if_it_fails_to_parse(self):
-        # First bracketed line is unparseable; upstream returns [] and so must we,
-        # rather than scanning on and recovering the second line's answer.
+        # First bracketed line is unparseable; upstream returns [] rather than scan on.
         out = "Final Answer: [Randolph County, Illinois]\nFinal Answer: ['Chicago']"
         assert extract_prediction(out) == []
 
@@ -231,8 +217,7 @@ class TestUpstreamParityOfExtractPrediction:
         assert extract_prediction(out) == ["Tyrion Lannister"]
 
     def test_empty_prefix_cannot_swallow_the_whole_line(self):
-        # Guards the fix that was NOT taken: blanking answer_prefix used to make the
-        # fallback match every line and return the entire first line as the prediction.
+        # A blank answer_prefix must not match every line.
         out = "The answer is the following day, based on document ID 7."
         assert extract_prediction(out, "") == []
 
@@ -254,9 +239,7 @@ class TestCoverageDenominator:
         assert m["num_samples"] == 2
 
     def test_all_unparseable_omits_coverage_as_upstream_does(self):
-        # Upstream aggregates each metric over the list it appended to, so a metric that
-        # was never appended is ABSENT.  Reporting 0.0 instead would fold a value into
-        # post_run_evaluate's macro average where upstream contributes nothing.
+        # As upstream: a metric with no scores is absent, not 0.0.
         rows = [_row("quest_32k", "dev", "no idea", ["a"])] * 2
         m = calculate_metrics(pd.DataFrame(rows))
         assert "coverage" not in m
@@ -272,9 +255,7 @@ class TestCoverageDenominator:
         assert m["f1"] == 0.5  # unparseable row contributes 0.0, denominator 2
 
     def test_all_unparseable_multi_value_task_stays_out_of_the_f1_macro(self):
-        # Multi-value f1 is upstream's unparseable-branch placeholder, not a measurement.
-        # When NO row parses, coverage is absent too, so the multi-value test must not
-        # key on coverage -- that folded the placeholder 0.0 into the f1 macro.
+        # With no parsed rows coverage is absent, so f1 must not be treated as real.
         rows = [
             _row("nq_32k", "test", "Final Answer: ['Paris']", ["Paris"]),
             _row("quest_32k", "test", "no idea", ["a"]),

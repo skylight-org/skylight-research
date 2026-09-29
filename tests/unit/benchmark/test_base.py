@@ -285,8 +285,7 @@ class TestGenerationKwargsIsolation:
 
     @staticmethod
     def _df_with_varying_max_new_tokens() -> pd.DataFrame:
-        # groupby("context") sorts by the context string, so "A" (32) is processed before
-        # "B" (512): exactly the order that used to cap B at 32.
+        # groupby sorts "A" (32) before "B" (512), the order that used to cap B at 32.
         return pd.DataFrame(
             {
                 "context": ["A", "B", "C"],
@@ -398,8 +397,6 @@ class TestPromptAnswerPrefixHook:
 
         store: Dict[str, Any] = {}
         NoPrefix()._process_all_requests(self._capture(store), self._df(), {}, {})
-        # Deleting the base.py hook would leave "Final Answer: " here and silently
-        # re-prime the prompt, suppressing LOFT's chain-of-thought step.
         assert store["answer_prefix"] == ""
 
     def test_prompt_prefix_is_passed_through_by_default(self):
