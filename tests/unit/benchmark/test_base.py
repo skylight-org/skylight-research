@@ -403,3 +403,62 @@ class TestPromptAnswerPrefixHook:
         store: Dict[str, Any] = {}
         MockBenchmark()._process_all_requests(self._capture(store), self._df(), {}, {})
         assert store["answer_prefix"] == "Final Answer: "
+
+
+class TestReasoningModels:
+    """Reasoning is stripped once for every benchmark; thinking drops prefixes."""
+
+    @staticmethod
+    def _df() -> pd.DataFrame:
+        return pd.DataFrame(
+            {
+                "context": ["C"],
+                "question": ["Q"],
+                "task": ["test_task1"],
+                "answers": [["A"]],
+                "answer_prefix": ["Final Answer: "],
+                "max_new_tokens": [16],
+            }
+        )
+
+    def test_reasoning_is_removed_and_raw_output_kept(self):
+        raw = "check [1][2]\n</think>\n\nFinal Answer: ['A']"
+        adapter = Mock()
+        adapter.process_request.side_effect = lambda r, g, k: Mock(responses=[raw])
+        out = MockBenchmark()._process_all_requests(adapter, self._df(), {}, {})
+        assert out["predicted_answer"].tolist() == ["Final Answer: ['A']"]
+        assert out["raw_output"].tolist() == [raw]
+
+    @pytest.mark.parametrize(
+        "thinking, prefix", [(True, ""), (False, "Final Answer: ")]
+    )
+    def test_thinking_mode_sends_no_completion_prefix(self, thinking, prefix):
+        # Reasoning models think before answering instead of completing a prefix.
+        sent: Dict[str, Any] = {}
+
+        def process(request, generation_kwargs, request_kwargs):
+            sent["answer_prefix"] = request.answer_prefix
+            return Mock(responses=["r"])
+
+        adapter = Mock()
+        adapter.process_request.side_effect = process
+        request_kwargs = {"chat_template_kwargs": {"enable_thinking": thinking}}
+        MockBenchmark()._process_all_requests(adapter, self._df(), {}, request_kwargs)
+        assert sent["answer_prefix"] == prefix
+
+    def test_thinking_answer_is_not_capped_by_the_completion_budget(self):
+        # RULER's 30-128 token budgets size a completion of the (dropped) prefix; a
+        # reasoning model restates the question first, so it gets the thinking budget.
+        sent: Dict[str, Any] = {}
+
+        def process(request, generation_kwargs, request_kwargs):
+            sent["max_new_tokens"] = generation_kwargs["max_new_tokens"]
+            return Mock(responses=["r"])
+
+        adapter = Mock()
+        adapter.process_request.side_effect = process
+        request_kwargs = {"chat_template_kwargs": {"enable_thinking": True}}
+        MockBenchmark()._process_all_requests(
+            adapter, self._df(), {"thinking_budget": 64}, request_kwargs
+        )
+        assert sent["max_new_tokens"] == 64  # the row's own budget is 16

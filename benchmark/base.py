@@ -18,6 +18,14 @@ from sparse_attention_hub.adapters.base import Request, RequestResponse, ModelAd
 from .utils import save_dataframe_to_csv, make_serializable
 
 
+def strip_reasoning(output: Any) -> Any:
+    """Return the answer after a reasoning block: the text after the last
+    ``</think>``, as in the Qwen model cards and lm-evaluation-harness."""
+    if isinstance(output, str) and "</think>" in output:
+        return output.rsplit("</think>", 1)[1].lstrip()
+    return output
+
+
 class Benchmark(ABC):
     """Abstract base class for benchmark evaluation.
 
@@ -159,6 +167,8 @@ class Benchmark(ABC):
             DataFrame with added 'predicted_answer' column.
         """
         max_requests = request_kwargs.get("max_requests", sys.maxsize)
+        chat_template_kwargs = request_kwargs.get("chat_template_kwargs") or {}
+        thinking: bool = chat_template_kwargs.get("enable_thinking") is True
 
         # Initialize predicted_answer column
         dataset_df = dataset_df.copy()
@@ -187,12 +197,19 @@ class Benchmark(ABC):
             })
             # Create request using current adapter interface (simplified)
             answer_prefix = df_group["answer_prefix"].iloc[0]
-            if not self.prompt_includes_answer_prefix:
+            # Reasoning models think before answering instead of completing a
+            # prefix (LoongRL's RULER protocol; Qwen3 report, thinking mode).
+            if not self.prompt_includes_answer_prefix or thinking:
                 answer_prefix = ""
             request: Request = Request(context=context, questions=questions, answer_prefix=answer_prefix)
             
             # using the first record for getting max new tokens
             max_new_tokens = df_group["max_new_tokens"].iloc[0]
+            if thinking:
+                # The row budget sizes a completion of the dropped prefix; a reasoning
+                # model restates the question, so its answer gets the thinking budget.
+                thinking_budget = generation_kwargs.get("thinking_budget") or 0
+                max_new_tokens = max(max_new_tokens, thinking_budget)
             param_max_new_tokens = generation_kwargs.get("max_new_tokens", sys.maxsize)
             # Per-group copy: mutating the caller's dict ratcheted the cap down.
             group_generation_kwargs = {
@@ -213,7 +230,12 @@ class Benchmark(ABC):
             # Memory cleanup for large contexts
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
-        
+
+        # Score the final answer of reasoning models; keep the full output.
+        dataset_df["raw_output"] = dataset_df["predicted_answer"]
+        dataset_df["predicted_answer"] = dataset_df["raw_output"].map(
+            strip_reasoning
+        )
         return dataset_df
 
     def run_benchmark(
