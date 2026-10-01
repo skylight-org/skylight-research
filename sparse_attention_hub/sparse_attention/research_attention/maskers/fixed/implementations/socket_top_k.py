@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import Dict, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple
 
 import torch
 
@@ -39,7 +39,7 @@ class SocketMaskerConfig(TopKMaskerConfig):
     L: int = 1
     tau: float = 0.3
 
-    def __post_init__(self):
+    def __post_init__(self) -> None:
         super().__post_init__()
         if self.K <= 0:
             raise ValueError("K must be positive")
@@ -103,7 +103,7 @@ class SocketMasker(TopKMasker):
         dropout: float,
         sparse_meta_data: Dict,
         previous_mask: Mask,
-        **kwargs,
+        **kwargs: Dict[str, Any],
     ) -> Mask:
         if previous_mask.is_full_mask():
             return previous_mask

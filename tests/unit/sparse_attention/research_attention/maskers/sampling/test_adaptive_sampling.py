@@ -273,6 +273,9 @@ class TestAdaptiveSamplingMasker:
 
     def test_get_std_estimate_using_base_sample(self, masker, sample_tensors):
         """Test standard deviation estimation using base sampling."""
+        # Unseeded, a repeated base sample (drawn with replacement) breaks the
+        # masked-vs-sampled std comparison below in a fraction of runs.
+        torch.manual_seed(0)
         batch_size, num_heads, seq_len_queries, seq_len_keys = 2, 4, 8, 1024
         expwts = torch.randn(batch_size, num_heads, seq_len_queries, seq_len_keys)
 
