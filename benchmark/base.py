@@ -52,6 +52,8 @@ class Benchmark(ABC):
     all_datasets: List[str] = []
     benchmark_name: str = ""
     huggingface_dataset_id: str = ""
+    # Whether the prompt ends with the dataset's answer_prefix (scoring always uses it).
+    prompt_includes_answer_prefix: bool = True
 
     def __init__(self, subsets_to_run: Optional[List[str]] = None) -> None:
         """Initialize benchmark with subset of datasets to run.
@@ -185,15 +187,21 @@ class Benchmark(ABC):
             })
             # Create request using current adapter interface (simplified)
             answer_prefix = df_group["answer_prefix"].iloc[0]
+            if not self.prompt_includes_answer_prefix:
+                answer_prefix = ""
             request: Request = Request(context=context, questions=questions, answer_prefix=answer_prefix)
             
             # using the first record for getting max new tokens
             max_new_tokens = df_group["max_new_tokens"].iloc[0]
             param_max_new_tokens = generation_kwargs.get("max_new_tokens", sys.maxsize)
-            generation_kwargs["max_new_tokens"] = min(param_max_new_tokens, max_new_tokens)
-            
+            # Per-group copy: mutating the caller's dict ratcheted the cap down.
+            group_generation_kwargs = {
+                **generation_kwargs,
+                "max_new_tokens": min(param_max_new_tokens, max_new_tokens),
+            }
+
             # Process through adapter
-            response: RequestResponse = adapter.process_request(request, generation_kwargs, request_kwargs)
+            response: RequestResponse = adapter.process_request(request, group_generation_kwargs, request_kwargs)
             
             # Assign responses back to DataFrame
             if isinstance(response.responses, list):

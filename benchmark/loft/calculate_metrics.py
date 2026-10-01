@@ -146,6 +146,7 @@ def extract_prediction(
     model_output_lines: List[str] = model_output.strip().split("\n")
     preds: List[str] = []
 
+    # As upstream (utils.py:465-478): stop at the first bracketed line, no fallback.
     for line in model_output_lines:
         if "[" in line and "]" in line:
             pred_start_index: int = line.find("[")
@@ -154,23 +155,11 @@ def extract_prediction(
             try:
                 pred_as_str = _escape_single_quotes(pred_as_str)
                 parsed = ast.literal_eval(pred_as_str)
-                if isinstance(parsed, list):
-                    preds = [str(p) for p in parsed]
-                else:
-                    preds = [str(parsed)]
-                break
+                # "[a], [b]" parses to a tuple; iterate it as upstream does.
+                preds = [str(p) for p in parsed]
             except Exception:
                 pass
-
-    if not preds:
-        for line in model_output_lines:
-            if answer_prefix.lower() in line.lower():
-                prefix_idx: int = line.lower().find(answer_prefix.lower())
-                after_prefix: str = line[prefix_idx + len(answer_prefix) :].strip()
-                after_prefix = after_prefix.lstrip(":").strip()
-                if after_prefix:
-                    preds = [after_prefix]
-                break
+            break
 
     return preds
 
@@ -240,12 +229,10 @@ def calculate_metrics(df: pd.DataFrame) -> Dict[str, Any]:
         )
 
         if not pred_answers_raw:
+            # As upstream (rag.py:80-88): score 0, and leave coverage out of the mean.
             all_em_scores.append(0.0)
             all_subspan_em_scores.append(0.0)
-            if is_multi_value:
-                all_coverage_scores.append(0.0)
-            else:
-                all_f1_scores.append(0.0)
+            all_f1_scores.append(0.0)
             continue
 
         pred_answers_normalized: List[str] = normalize_answers(pred_answers_raw)
@@ -277,9 +264,12 @@ def calculate_metrics(df: pd.DataFrame) -> Dict[str, Any]:
         "subspan_em": float(np.mean(all_subspan_em_scores)),
     }
 
+    # As upstream's aggregate_metrics: a metric with no scores is omitted, not 0.0.
     if is_multi_value:
-        metrics["coverage"] = float(np.mean(all_coverage_scores))
-    else:
+        if all_coverage_scores:
+            metrics["coverage"] = float(np.mean(all_coverage_scores))
+        metrics["num_scored_for_coverage"] = len(all_coverage_scores)
+    if all_f1_scores:
         metrics["f1"] = float(np.mean(all_f1_scores))
 
     metrics["num_samples"] = len(df)
