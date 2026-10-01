@@ -263,3 +263,23 @@ class TestCoverageDenominator:
         out = LoftRag(["nq_32k", "quest_32k"]).post_run_evaluate(pd.DataFrame(rows))
         assert out["overall"]["f1"] == 1.0
         assert out["by_split"]["test"]["overall"]["f1"] == 1.0
+
+
+class TestMacroAggregation:
+    """Cross-task averages must not reward an arm for failing a whole task."""
+
+    def test_all_unparseable_task_counts_as_zero_coverage(self):
+        rows = [
+            _row("qampari_128k", "test", "Final Answer: ['a', 'b']", ["a", "b"]),
+            _row("quest_128k", "test", "I cannot determine the answer.", ["x", "y"]),
+        ]
+        loft = LoftRag(["qampari_128k", "quest_128k"])
+        out = loft.post_run_evaluate(pd.DataFrame(rows))
+        assert out["overall"]["coverage"] == 0.5
+        assert out["by_split"]["test"]["overall"]["coverage"] == 0.5
+
+    def test_comparable_split_not_named_without_test_rows(self):
+        # e.g. max_requests <= 10 evaluates only the dev rows, which load first.
+        rows = [_row("nq_128k", "dev", "Final Answer: ['a']", ["a"])]
+        out = LoftRag(["nq_128k"]).post_run_evaluate(pd.DataFrame(rows))
+        assert "loft_comparable_split" not in out["summary"]

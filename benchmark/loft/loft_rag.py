@@ -170,8 +170,9 @@ class LoftRag(Benchmark):
             # Multi-value f1 is a parse-failure placeholder; keep it out.
             if "f1" in metrics and "num_scored_for_coverage" not in metrics:
                 all_f1_scores.append(metrics["f1"])
-            if "coverage" in metrics:
-                all_coverage_scores.append(metrics["coverage"])
+            if "num_scored_for_coverage" in metrics:
+                # No parsed rows means no coverage: 0.0, not dropped from the macro.
+                all_coverage_scores.append(metrics.get("coverage", 0.0))
 
             metric_str: str = (
                 f"EM={metrics['em']:.4f}, Subspan_EM={metrics['subspan_em']:.4f}"
@@ -233,16 +234,19 @@ class LoftRag(Benchmark):
                     continue
                 agg: Dict[str, Any] = {"n_samples": int(len(split_df))}
                 for key in ("em", "subspan_em", "f1", "coverage"):
-                    vals = [
-                        m[key]
-                        for m in per_task.values()
-                        if key in m and not (key == "f1" and "num_scored_for_coverage" in m)
-                    ]
+                    vals = []
+                    for m in per_task.values():
+                        multi_value = "num_scored_for_coverage" in m
+                        if key == "coverage" and multi_value:
+                            vals.append(m.get("coverage", 0.0))  # as in `overall`
+                        elif key in m and not (key == "f1" and multi_value):
+                            vals.append(m[key])
                     if vals:
                         agg[key] = round(float(sum(vals) / len(vals)), 4)
                 by_split[str(split_name)] = {"overall": agg, "task_metrics": per_task}
             if by_split:
                 overall_metrics["by_split"] = by_split
+            if "test" in by_split:
                 overall_metrics["summary"]["loft_comparable_split"] = "test"
 
         return overall_metrics
