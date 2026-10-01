@@ -10,8 +10,10 @@ Checked against https://github.com/google-deepmind/loft (sha 219f68e):
 * The 32k prompts are 42-46k Llama tokens; head-keeping truncation at 32768 drops the
   few-shot examples.  Set max_context_length from your tokenizer.
 * Generation is greedy with an 8192-token budget, as gemini-1.5-pro in upstream.
-* The model's chat template wraps the prompt.  For reasoning models, disable thinking
-  and stop on the end-of-turn token, or the parser grades the reasoning block.
+* The model's chat template wraps the prompt.  Reasoning models: set
+  request_kwargs["chat_template_kwargs"] = {"enable_thinking": True/False}; when
+  thinking, also set generation_kwargs["thinking_budget"] (Qwen uses 8192).  Only the
+  answer after the last </think> is scored.
 """
 
 from typing import Any, Dict, List

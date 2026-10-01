@@ -6,7 +6,6 @@ from contextlib import contextmanager
 from typing import Any, Callable, Dict, Generator, List, Optional, Tuple
 
 import torch
-from tqdm import tqdm
 from transformers.masking_utils import ALL_MASK_ATTENTION_FUNCTIONS
 from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
 
@@ -17,6 +16,46 @@ from .model_servers.huggingface import ModelServerHF
 from .utils.config import ModelServerConfig
 
 INT_MAX = 2**31 - 1
+
+# Qwen's thinking-budget stop text (Qwen3 Technical Report; QwenLM/Qwen3
+# docs/source/getting_started/thinking_budget.md).
+THINKING_STOP_TEXT = (
+    "Considering the limited time by the user, I have to give the solution "
+    "based on the thinking directly now.\n</think>.\n\n"
+)
+
+
+def _next_token(
+    logits: torch.Tensor,
+    generated: List[int],
+    generation_kwargs: Dict[str, Any],
+    rng: torch.Generator,
+) -> int:
+    """Pick the next token: greedy unless a temperature is set.
+
+    The presence penalty applies to generated tokens only, as in vLLM and the
+    OpenAI API; top-k and top-p filter after temperature scaling.
+    """
+    logits = logits.float().clone()
+    presence_penalty = generation_kwargs.get("presence_penalty") or 0.0
+    if presence_penalty and generated:
+        logits[torch.tensor(sorted(set(generated)))] -= presence_penalty
+    temperature = generation_kwargs.get("temperature") or 0.0
+    if temperature <= 0.0:
+        return int(logits.argmax())
+    logits = logits / temperature
+    top_k = generation_kwargs.get("top_k") or 0
+    if top_k > 0:
+        kth = torch.topk(logits, min(top_k, logits.numel())).values[-1]
+        logits[logits < kth] = float("-inf")
+    probs = torch.softmax(logits, dim=-1)
+    top_p = generation_kwargs.get("top_p") or 1.0
+    if top_p < 1.0:
+        sorted_probs, order = torch.sort(probs, descending=True)
+        outside = torch.cumsum(sorted_probs, dim=-1) - sorted_probs >= top_p
+        probs[order[outside]] = 0.0
+        probs = probs / probs.sum()
+    return int(torch.multinomial(probs, 1, generator=rng))
 
 
 class ModelAdapterHF(ModelAdapter):
@@ -150,8 +189,15 @@ class ModelAdapterHF(ModelAdapter):
         answer_prefix: str = request.answer_prefix
 
         context, questions = self._preprocess_context_and_questions(
-            context, questions, answer_prefix
+            context,
+            questions,
+            answer_prefix,
+            chat_template_kwargs=request_kwargs.get("chat_template_kwargs"),
         )
+        # Qwen3.5-style templates open the reasoning block in the prompt itself.
+        prompt_opens_thinking: bool = questions[0].rfind("<think>") > questions[
+            0
+        ].rfind("</think>")
 
         # `_preprocess_context_and_questions` may have already applied the chat
         # template, which emits the model's BOS itself. Several fast tokenizers
@@ -194,6 +240,7 @@ class ModelAdapterHF(ModelAdapter):
                         context_tokens,
                         past_key_values=None,
                         use_cache=True,
+                        logits_to_keep=1,  # prefill only fills the cache
                         sparse_meta_data=sparse_meta_data,
                     )
 
@@ -203,6 +250,7 @@ class ModelAdapterHF(ModelAdapter):
                             context_outputs,
                             sparse_meta_data,
                             generation_kwargs,
+                            prompt_opens_thinking=prompt_opens_thinking,
                             **kwargs,
                         )
                 else:
@@ -210,6 +258,7 @@ class ModelAdapterHF(ModelAdapter):
                         context_tokens,
                         past_key_values=None,
                         use_cache=True,
+                        logits_to_keep=1,  # prefill only fills the cache
                     )
 
                     response_text = self._generate_response(
@@ -217,6 +266,7 @@ class ModelAdapterHF(ModelAdapter):
                         context_outputs,
                         sparse_meta_data,
                         generation_kwargs,
+                        prompt_opens_thinking=prompt_opens_thinking,
                         **kwargs,
                     )
 
@@ -228,7 +278,11 @@ class ModelAdapterHF(ModelAdapter):
             return RequestResponse(responses=responses)
 
     def _preprocess_context_and_questions(
-        self, context: str, questions: List[str], answer_prefix: str
+        self,
+        context: str,
+        questions: List[str],
+        answer_prefix: str,
+        chat_template_kwargs: Optional[Dict[str, Any]] = None,
     ) -> Tuple[str, List[str]]:
         """Preprocess the context and questions -- apply chat template if needed
 
@@ -242,6 +296,7 @@ class ModelAdapterHF(ModelAdapter):
                 [{"role": "user", "content": context}],
                 tokenize=False,
                 add_generation_prompt=True,
+                **(chat_template_kwargs or {}),
             )
         new_context = context.split(self.random_separator)[0]
         new_questions = [
@@ -416,6 +471,7 @@ class ModelAdapterHF(ModelAdapter):
         context_outputs: Any,
         sparse_meta_data: Dict[str, Any],
         generation_kwargs: Dict[str, Any],
+        prompt_opens_thinking: bool = False,
         **kwargs: Dict[str, Any],
     ) -> str:
         """Generate text response.
@@ -431,6 +487,11 @@ class ModelAdapterHF(ModelAdapter):
         should_stop_token_ids = self.model.generation_config.eos_token_id
         if not isinstance(should_stop_token_ids, list):
             should_stop_token_ids = [should_stop_token_ids]
+        # Checkpoints without generation_config.json only know <|endoftext|>.
+        eos_id = self.tokenizer.eos_token_id
+        if eos_id is not None:
+            # Not .append(): the list may be the model's own generation_config.
+            should_stop_token_ids = should_stop_token_ids + [eos_id]
 
         # Start from cached context state
         past_key_values = context_outputs.past_key_values
@@ -478,33 +539,77 @@ class ModelAdapterHF(ModelAdapter):
         if last_outputs is None:
             raise ValueError("Question tokens are empty; cannot generate response")
 
-        generated_ids = [last_outputs.logits[0, -1].argmax()]
+        if generation_kwargs.get("min_p"):
+            raise ValueError("min_p sampling is not supported")
+        device = last_outputs.logits.device
+        seed = generation_kwargs.get("seed", 0)
+        rng = torch.Generator(device=device).manual_seed(seed)
+        generated_ids: List[int] = [
+            _next_token(last_outputs.logits[0, -1], [], generation_kwargs, rng)
+        ]
+
+        # Thinking budget, as Qwen evaluates reasoning models: reasoning that
+        # reaches the budget is closed with Qwen's stop text, and max_new_tokens
+        # then bounds the answer alone. Without a budget it bounds everything.
+        thinking_budget: Optional[int] = generation_kwargs.get("thinking_budget")
+        think_start = self.tokenizer.convert_tokens_to_ids("<think>")
+        think_end = self.tokenizer.convert_tokens_to_ids("</think>")
+        in_thinking = prompt_opens_thinking
+        thinking_tokens = answer_tokens = 0
 
         # ------------------------------------------------------------------
         # Step 2: continue normal autoregressive generation, one token at a time
         # ------------------------------------------------------------------
-        for _ in tqdm(range(max_new_tokens - 1), disable=(max_new_tokens < 1000)):
-            model_kwargs = {
-                "input_ids": generated_ids[-1].unsqueeze(0).unsqueeze(0),
-                "past_key_values": past_key_values,
-                "use_cache": True,
-            }
-
-            if self._sparse_attention_available:
-                model_kwargs["sparse_meta_data"] = sparse_meta_data
-
-            with torch.no_grad():
-                outputs = self.model(**model_kwargs)
-
-            past_key_values = outputs.past_key_values
-            new_id = outputs.logits[0, -1].argmax()
-            generated_ids.append(new_id)
-
-            if new_id.item() in should_stop_token_ids:
+        while True:
+            last = generated_ids[-1]
+            if last in should_stop_token_ids:
+                break
+            if last == think_start:
+                in_thinking = True
+            elif last == think_end:
+                in_thinking = False
+            elif in_thinking:
+                thinking_tokens += 1
+            else:
+                answer_tokens += 1
+            if thinking_budget is None:
+                if len(generated_ids) >= max_new_tokens:
+                    break
+            elif not in_thinking and answer_tokens >= max_new_tokens:
                 break
 
-        answer: str = self.tokenizer.decode(
-            torch.stack(generated_ids), skip_special_tokens=True
-        )
+            feed = [last]
+            budget_spent = thinking_budget is not None and (
+                thinking_tokens >= thinking_budget
+            )
+            if in_thinking and budget_spent:
+                stop = self.tokenizer.encode(
+                    THINKING_STOP_TEXT, add_special_tokens=False
+                )
+                feed += stop
+                generated_ids += stop
+                in_thinking = False
+
+            # Hybrid models take one token per step on the cached path.
+            steps = [[t] for t in feed] if self.hybrid else [feed]
+            for step in steps:
+                model_kwargs = {
+                    "input_ids": torch.tensor([step], device=device),
+                    "past_key_values": past_key_values,
+                    "use_cache": True,
+                }
+                if self._sparse_attention_available:
+                    model_kwargs["sparse_meta_data"] = sparse_meta_data
+                with torch.no_grad():
+                    outputs = self.model(**model_kwargs)
+                past_key_values = outputs.past_key_values
+
+            generated_ids.append(
+                _next_token(
+                    outputs.logits[0, -1], generated_ids, generation_kwargs, rng
+                )
+            )
+
+        answer: str = self.tokenizer.decode(generated_ids, skip_special_tokens=True)
 
         return answer
