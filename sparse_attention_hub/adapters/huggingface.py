@@ -3,7 +3,7 @@
 import random
 import string
 from contextlib import contextmanager
-from typing import Any, Callable, Dict, Generator, List, Optional, Tuple
+from typing import Any, Callable, Dict, Generator, List, Optional, Tuple, Union
 
 import torch
 from tqdm import tqdm
@@ -33,6 +33,8 @@ class ModelAdapterHF(ModelAdapter):
         device: Optional[str] = None,
         hybrid: Optional[bool] = None,
         revision: Optional[str] = None,
+        quantize_kv_cache: Union[bool, str] = False,
+        kv_quantization_kwargs: Optional[Dict[str, Any]] = None,
         **kwargs: Any,
     ) -> None:
         """Initialize HuggingFace adapter.
@@ -49,6 +51,13 @@ class ModelAdapterHF(ModelAdapter):
                 ModelServer cache key so that two revisions of the same model name do not
                 collide on a single cached instance. An explicit ``revision`` already present
                 in either dict takes precedence.
+            quantize_kv_cache: Which KV cache quantization to use. False for none,
+                "nvfp4" for real packed NVFP4 (needs nvidia-modelopt and a CUDA
+                GPU), "fake_nvfp4" for simulated NVFP4 in pure torch (same
+                accuracy loss, no memory saving, runs anywhere).
+            kv_quantization_kwargs: Options for the quantized cache:
+                block_size, residual_length, axis_key, axis_value,
+                quantize_prefill. Ignored when quantize_kv_cache is False.
         """
         super().__init__(model_name, sparse_attention_config, **kwargs)
         self._registered_attention_name: Optional[str] = None
@@ -81,6 +90,13 @@ class ModelAdapterHF(ModelAdapter):
         self._sparse_attention_available: bool = sparse_attention_config is not None
         # Control token-by-token question processing (for hybrid models)
         self.hybrid = hybrid if hybrid is not None else False
+        # False, or the name of a KV cache quantization backend
+        self.quantize_kv_cache: Union[bool, str] = quantize_kv_cache
+        self.kv_quantization_kwargs: Dict[str, Any] = kv_quantization_kwargs or {}
+        if quantize_kv_cache:
+            from ..kv_quantization import validate_backend
+
+            validate_backend(quantize_kv_cache)
         # Convert device string to GPU ID for ModelServer
         gpu_id: Optional[int] = None
         if self.device.startswith("cuda"):
@@ -192,7 +208,7 @@ class ModelAdapterHF(ModelAdapter):
                 if self._sparse_attention_available:
                     context_outputs = self.model(
                         context_tokens,
-                        past_key_values=None,
+                        past_key_values=self._create_kv_cache(),
                         use_cache=True,
                         sparse_meta_data=sparse_meta_data,
                     )
@@ -208,7 +224,7 @@ class ModelAdapterHF(ModelAdapter):
                 else:
                     context_outputs = self.model(
                         context_tokens,
-                        past_key_values=None,
+                        past_key_values=self._create_kv_cache(),
                         use_cache=True,
                     )
 
@@ -226,6 +242,28 @@ class ModelAdapterHF(ModelAdapter):
             return RequestResponse(responses=responses[0])
         else:
             return RequestResponse(responses=responses)
+
+    def _create_kv_cache(self) -> Optional[Any]:
+        """Create the KV cache to prefill a request into.
+
+        Returns:
+            None to let HuggingFace use its default cache, or a fresh cache from
+            the backend named by quantize_kv_cache. A new instance is needed per
+            question, since the cache holds that question's state.
+
+        Raises:
+            ValueError: If quantize_kv_cache is not False or a known backend.
+        """
+        if not self.quantize_kv_cache:
+            return None
+
+        from ..kv_quantization import create_quantized_kv_cache, validate_backend
+
+        return create_quantized_kv_cache(
+            self.model.config,
+            backend=validate_backend(self.quantize_kv_cache),
+            **self.kv_quantization_kwargs,
+        )
 
     def _preprocess_context_and_questions(
         self, context: str, questions: List[str], answer_prefix: str
