@@ -124,7 +124,16 @@ class QuantizedKVStore:
                     raise ValueError("Cache policy returned an invalid chunk length")
                 start = target.recent[0].start_token
                 moved = self._take_local(kind, target, count, encode, decode)
-                target.chunks.append(encode(kind, "middle", moved, start))
+                page = policy.page_tokens(kind) or count
+                for offset in range(0, count, page):
+                    target.chunks.append(
+                        encode(
+                            kind,
+                            "middle",
+                            moved[..., offset : offset + page, :],
+                            start + offset,
+                        )
+                    )
             # Tokens still in the local window are stored with the local quantizer.
             target.recent = [
                 encode(kind, "local", chunk.full_precision, chunk.start_token)

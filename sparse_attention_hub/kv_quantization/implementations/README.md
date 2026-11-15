@@ -8,7 +8,7 @@ parent package. The generic baseline is configured through
 | Method | Configuration / class | Source | Status |
 |---|---|---|---|
 | [KIVI](#kivi) | `KIVIConfig` / `KIVI` | [kivi.py](kivi.py) | Implemented portable numerical/cache path |
-| Kitty | `KittyConfig` / `Kitty` | [kitty.py](kitty.py) | Scaffold |
+| [Kitty](#kitty) | `KittyConfig` / `Kitty` | [kitty.py](kitty.py) | Implemented; bit-exact with the authors' accuracy simulation |
 | [QuaRot KV](#quarot-kv) | `QuaRotKVConfig` / `QuaRotKV` | [quarot_kv.py](quarot_kv.py) | Implemented portable accuracy-profile KV path |
 | [TurboQuant KV](#turboquant-kv) | `TurboQuantKVConfig` / `TurboQuantKV` | [turboquant_kv.py](turboquant_kv.py) | Implemented portable MSE/prod mathematical profiles |
 | KVQuant NUQ | `KVQuantNUQConfig` / `KVQuantNUQ` | [kvquant_nuq.py](kvquant_nuq.py) | Scaffold |
@@ -21,8 +21,10 @@ its recipe is implemented.
 
 ## KIVI
 
-The KIVI recipe uses a dedicated numerical quantizer and the shared request-local
-cache store. The generic integer quantizer remains available for experiments.
+The KIVI recipe uses `IntQuantizer` with `kivi_int_quantizer()` (defined in `kivi.py`)
+(the released arithmetic) and the shared request-local cache store. The dedicated
+`KIVIQuantizer` gives the same numbers and is still accepted; the generic integer
+arithmetic remains available for experiments.
 
 ### Reference
 
@@ -40,7 +42,8 @@ mandate the dtype of every intermediate operation.
 | File | Responsibility |
 |---|---|
 | [Recipe](kivi.py) | `KIVIConfig`, default components and configuration validation |
-| [Quantizer](../quantizers/implementations/kivi.py) | `KIVIQuantizerConfig`, native-dtype encoding, unpacking and finite-value checks |
+| [Quantizer](../quantizers/implementations/integer.py) | `IntQuantizer`, configured by `kivi_int_quantizer()` in the recipe (default): native-dtype encoding, unpacking and finite-value checks |
+| [Dedicated quantizer](../quantizers/implementations/kivi.py) | `KIVIQuantizerConfig`: the same arithmetic as a separate codec |
 | [Coordinator](../base.py) | Prepare attention K/V before updating and compressing the store |
 | [Store](../cache/store.py) | Independent per-layer K/V histories and compressed/full-precision chunks |
 | [Cache policy](../policies/cache/implementations/sink_and_local.py) | Buffered keys and rolling full-precision values |
@@ -106,6 +109,70 @@ These tests require no pretrained model weights or evaluation datasets.
   numerically equivalent to sequential calls crossing buffer boundaries.
 - CPU reference/callback checks do not establish fused CUDA equivalence,
   pretrained task quality, total GPU-memory savings or inference speed.
+
+## Kitty
+
+Kitty (Xia et al., MLSys 2026, [arXiv 2511.18643](https://arxiv.org/abs/2511.18643))
+stores keys and values in 2 bits but gives the most important key channels of
+every 128-token page 4 bits ("channel boost").
+
+### Reference
+
+The recipe reproduces the authors' **accuracy simulation**, which produced the
+paper's accuracy tables: [Summer-Summer/Kitty](https://github.com/Summer-Summer/Kitty)
+at `dfd2c07b407d6b407179359207c612ab631f3ed1`, `src/kitty_sim/utils_quant.py`
+and `src/kitty_sim/kitty_simulate.py` (MIT, see [LICENSE-KITTY](../LICENSE-KITTY)).
+The pinned files are vendored, hash-checked, in `tests/reference/kitty/`.
+
+### What the method does
+
+| Step | Kitty | Part in this package |
+|---|---|---|
+| First 32 tokens (keys and values) | full precision | `KittyCachePolicyConfig.key_sink` / `value_sink` |
+| Keys | wait in a 128-token buffer; when the 129th key arrives, the full page is quantized | `KittyCachePolicy` (`move_full_pages_past_buffer`) |
+| Key page | per channel, one group of 128 tokens; 2 bits | `kitty_int_quantizer(bits=2, PER_CHANNEL, group_size=128)` |
+| Channel boost | per page and head, the top `int(0.125 * 128) = 16` channels by mean \|k\| get 4 bits (Kitty-Pro: 25%) | `ChannelBoostConfig(count_rounding="floor", score_dtype="input")`; `KittyCachePolicy.page_tokens` makes every page its own chunk |
+| Values | newest 128 in full precision; older ones per token, 2 bits, group = whole head (128) | `KittyCachePolicy` value window + `kitty_int_quantizer(bits=2, group_size=128)` |
+| Current call | attends to its exact K/V, quantized afterwards (`PostQuant=True`) | the shared coordinator's default flow |
+
+Arithmetic (`kitty_int_quantizer()` in `kitty.py`; the dedicated `KittyQuantizer` in
+`quantizers/implementations/kitty.py` gives the same numbers) stays in the input
+dtype like the reference: `scale = max(max - min, eps) / (2^b - 1)` with eps 1e-4 for
+FP16/BF16, `q = round(clamp((x - min) / scale, 0, 2^b - 1))`, `x~ = q * scale + min`.
+
+### Usage
+
+```python
+from sparse_attention_hub.kv_quantization import KittyConfig
+
+KittyConfig()                                   # Kitty: 12.5% boosted key channels
+KittyConfig.pro()                               # Kitty-Pro: 25%
+KittyConfig.with_settings(boost_fraction=0)     # the paper's KIVI* baseline (sinks, no boost)
+KittyConfig.with_settings(channel_selection="random")   # ablation; also "variance"
+```
+
+`ChannelBoost`, `KittyQuantizer` and `KittyCachePolicy` also compose freely in a
+plain `KVQuantizationConfig`. `validate_kitty` only guards the named recipe.
+
+### Tests
+
+- `tests/unit/kv_quantization/test_kitty_reference.py`: key pages (12.5/25/10/20%,
+  magnitude and variance selection) and values are **bit-identical** to the
+  authors' `build_promote_mask` + `fake_quant_groupwise_lastdim` in FP16 and BF16;
+  the attention K/V of every prefill and decode step equal the authors'
+  `KittyKVCache.update` for several prompt lengths.
+- `tests/unit/kv_quantization/test_kitty_preset.py`: configuration, validation,
+  page-wise storage and boosting, packed = fake storage, storage size.
+
+### Scope and limits
+
+- When the prompt after the sinks is an exact multiple of 128 (more than one
+  page), the reference fake-quantizes the last prompt page a second time at the
+  first decode step. We quantize each page once; only that page differs.
+- The authors' system path (CUDA kernels, two 2-bit planes, a paged value buffer)
+  is a different storage backend; packed storage here uses Skylight's bitstream
+  with one width byte per group. No speed or total-memory claim.
+- The paper evaluates in FP16; BF16 runs use the same operations in BF16.
 
 ## QuaRot KV
 
@@ -196,7 +263,8 @@ ResearchAttention and its maskers require no rotation-specific edits.
 This changes floating-point operation order: the authors rotate Q explicitly
 and incorporate V rotations into projection weights. Our original-coordinate
 reconstruction is not claimed bit-identical to that full model preparation.
-The dedicated codec itself is checked exactly on the same rotated input.
+The codec (`quarot_int_quantizer()` by default, or the dedicated
+`QuaRotQuantizer`) is checked exactly on the same rotated input.
 
 Prefill keeps the native mask format when token positions/lengths are unchanged.
 For longer independent history, eager/SDPA prefill uses the existing mask alignment
@@ -215,9 +283,10 @@ config = ResearchAttentionConfig(
 )
 ~~~
 
-The default requires head_dim=128. For another head dimension, explicitly set
-the key/value QuaRotQuantizerConfig.group_size values and preserve the key's
-parameter_mode="key_head". Setting store_codes=False selects FAKE storage.
+The default requires head_dim=128. For another head dimension, set the group
+sizes explicitly, e.g. `key_quantizer=quarot_int_quantizer("key_head",
+group_size=head_dim)` (keys use one group per head) and a matching
+`quarot_int_quantizer("value_group", group_size=...)`. Setting store_codes=False selects FAKE storage.
 Setting quantize_prefill=False is an explicit native-prefill experiment.
 
 ~~~bash

@@ -4,11 +4,13 @@ import pytest
 import torch
 
 from sparse_attention_hub.kv_quantization import (
+    kivi_int_quantizer,
     CACHE_KEY,
     KIVI,
     FixedPrecision,
     FP8QuantizerConfig,
     IdentityTransform,
+    IntQuantizer,
     IntQuantizerConfig,
     KittyCachePolicyConfig,
     KIVIConfig,
@@ -56,7 +58,12 @@ class TestConstruction:
         assert isinstance(kvq.cache_policy, SinkAndLocalCachePolicy)
         assert isinstance(kvq.precision_policy, FixedPrecision)
         assert isinstance(kvq.key_transform, IdentityTransform)
-        assert isinstance(kvq.key_quantizer, KIVIQuantizer)
+        assert type(kvq.key_quantizer) is IntQuantizer
+        assert type(kvq.value_quantizer) is IntQuantizer
+        assert kvq.config.key_quantizer == kivi_int_quantizer(
+            granularity=PER_CHANNEL
+        )
+        assert kvq.config.value_quantizer == kivi_int_quantizer()
 
     def test_defaults_are_kivi_2(self):
         config = KIVIConfig()

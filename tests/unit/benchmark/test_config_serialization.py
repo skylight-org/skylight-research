@@ -64,12 +64,19 @@ def test_nested_configs_keep_class_identity_and_are_stable_across_instances(conf
         "." + type(config.key_quantizer).__name__
     )
     if isinstance(config, KIVIConfig):
-        assert result["key_quantizer"]["parameter_dtype"] == "input"
-        assert len(result["key_quantizer"]["reference_revision"]) == 40
+        # kivi_int_quantizer(): the preset's numerical settings are recorded.
+        assert result["key_quantizer"]["compute_dtype"] == "input"
+        assert result["key_quantizer"]["parameter_storage"] == "compute"
+        assert result["key_quantizer"]["degenerate_range"] == "zero_scale"
+        assert result["key_quantizer"]["decode_dtype"] == "fp16"
     if isinstance(config, QuaRotKVConfig):
-        assert result["key_quantizer"]["parameter_dtype"] == "upstream_path"
-        assert result["key_quantizer"]["parameter_mode"] == "key_head"
-        assert result["value_quantizer"]["parameter_mode"] == "value_group"
+        # quarot_int_quantizer("key_head") / ("value_group").
+        assert result["key_quantizer"]["compute_dtype"] == "fp32"
+        assert result["key_quantizer"]["range_includes_zero"] is True
+        assert result["key_quantizer"]["zero_point"] == "integer"
+        assert result["key_quantizer"]["clip_ratio"] == 0.95
+        assert result["value_quantizer"]["compute_dtype"] == "input"
+        assert result["value_quantizer"]["range_includes_zero"] is False
         assert result["key_transform"]["preserve_input_dtype"] is True
         assert result["quantize_prefill"] is True
     if isinstance(config, TurboQuantKVConfig):

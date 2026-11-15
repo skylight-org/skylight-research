@@ -5,11 +5,20 @@ from .cache.block import QuantizedTensor, StoredChunk  # noqa: F401
 from .cache.state import LayerKVState, TensorCacheState  # noqa: F401
 from .cache.store import CACHE_KEY, QuantizedKVStore  # noqa: F401
 from .context import AttentionContext  # noqa: F401
-from .implementations.kitty import Kitty, KittyConfig  # noqa: F401
-from .implementations.kivi import KIVI, KIVIConfig  # noqa: F401
+from .implementations.kitty import (  # noqa: F401
+    Kitty,
+    KittyConfig,
+    kitty_int_quantizer,
+    validate_kitty,
+)
+from .implementations.kivi import KIVI, KIVIConfig, kivi_int_quantizer  # noqa: F401
 from .implementations.kvquant_nuq import KVQuantNUQ, KVQuantNUQConfig  # noqa: F401
 from .implementations.nvfp4_kv import NVFP4KV, NVFP4KVConfig  # noqa: F401
-from .implementations.quarot_kv import QuaRotKV, QuaRotKVConfig  # noqa: F401
+from .implementations.quarot_kv import (  # noqa: F401
+    QuaRotKV,
+    QuaRotKVConfig,
+    quarot_int_quantizer,
+)
 from .implementations.turboquant_kv import (  # noqa: F401
     TurboQuantKV,
     TurboQuantKVConfig,
@@ -74,6 +83,11 @@ from .quantizers.implementations.fp8 import (  # noqa: F401
 from .quantizers.implementations.integer import (  # noqa: F401
     IntQuantizer,
     IntQuantizerConfig,
+)
+from .quantizers.implementations.kitty import (  # noqa: F401
+    KITTY_REFERENCE_REVISION,
+    KittyQuantizer,
+    KittyQuantizerConfig,
 )
 from .quantizers.implementations.kivi import (  # noqa: F401
     KIVI_REFERENCE_REVISION,

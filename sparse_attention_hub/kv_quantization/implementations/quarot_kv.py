@@ -8,9 +8,51 @@ import torch
 from ..base import KVQuantization, KVQuantizationConfig
 from ..policies.cache.implementations.immediate import FullQuantizationCachePolicyConfig
 from ..policies.precision.implementations.fixed import FixedPrecisionConfig
+from ..quantizers.base import KVQuantizerConfig, QuantGranularity
+from ..quantizers.implementations.integer import IntQuantizerConfig
 from ..quantizers.implementations.quarot import QuaRotQuantizerConfig
 from ..registry import KVQuantizationRegistry
 from ..transforms.implementations.hadamard import HadamardTransformConfig
+
+
+def quarot_int_quantizer(
+    mode: str = "value_group",
+    bits: int = 4,
+    group_size: int = 128,
+    symmetric: bool = False,
+    clip_ratio: float = 0.95,
+    **overrides: Any,
+) -> IntQuantizerConfig:
+    """IntQuantizerConfig with QuaRot's ActQuantizer arithmetic
+    (fake_quant/quant_utils.py @ 5008669), per token (channels grouped).
+
+    ``mode="key_head"``: QKRotationWrapper's per-head key call (groupsize=-1 on
+    [-1, head_dim]); the range includes 0 and, through PyTorch's promotion against
+    an FP32 zero tensor, everything is FP32. ``group_size`` must equal head_dim.
+    ``mode="value_group"``: the v_proj output quantizer
+    (find_params_per_token_groupwise), in the input dtype.
+    ``overrides`` changes any other IntQuantizerConfig field.
+    """
+    if mode not in ("key_head", "value_group"):
+        raise ValueError("QuaRot mode must be key_head or value_group")
+    settings: dict = dict(
+        bits=bits,
+        granularity=QuantGranularity.PER_TOKEN,
+        group_size=group_size,
+        symmetric=symmetric,
+        compute_dtype="fp32" if mode == "key_head" else "input",
+        parameter_storage="compute",
+        zero_point="float" if symmetric else "integer",
+        clip_ratio=clip_ratio,
+        range_includes_zero=mode == "key_head",
+        degenerate_range="pm_one",
+        rounding="round_clamp",
+        decode_dtype="compute",
+        symmetric_range="full" if symmetric else "balanced",
+        complete_groups=True,
+    )
+    settings.update(overrides)
+    return IntQuantizerConfig(**settings)
 
 
 @dataclass(frozen=True)
@@ -18,7 +60,9 @@ class QuaRotKVConfig(KVQuantizationConfig):
     """Rotated per-token KV groups; no exact residual, including current tokens.
 
     Defaults: asymmetric INT4, group size 128, clipping 0.95, quantized prefill
-    and packed storage. Weights and ordinary model activations remain untouched.
+    and packed storage. The codec is IntQuantizer with ``quarot_int_quantizer()``
+    (per-head keys, grouped values); QuaRotQuantizerConfig (the dedicated codec)
+    gives the same numbers. Weights and ordinary model activations remain untouched.
     """
 
     key_transform: HadamardTransformConfig = field(
@@ -27,11 +71,11 @@ class QuaRotKVConfig(KVQuantizationConfig):
     value_transform: HadamardTransformConfig = field(
         default_factory=lambda: HadamardTransformConfig(preserve_input_dtype=True)
     )
-    key_quantizer: QuaRotQuantizerConfig = field(
-        default_factory=lambda: QuaRotQuantizerConfig(parameter_mode="key_head")
+    key_quantizer: KVQuantizerConfig = field(
+        default_factory=lambda: quarot_int_quantizer("key_head")
     )
-    value_quantizer: QuaRotQuantizerConfig = field(
-        default_factory=lambda: QuaRotQuantizerConfig(parameter_mode="value_group")
+    value_quantizer: KVQuantizerConfig = field(
+        default_factory=lambda: quarot_int_quantizer("value_group")
     )
     cache_policy: FullQuantizationCachePolicyConfig = field(
         default_factory=FullQuantizationCachePolicyConfig
@@ -52,9 +96,25 @@ def validate_quarot_config(config: QuaRotKVConfig) -> None:
             raise ValueError(
                 "QuaRot requires HadamardTransform with preserve_input_dtype=True"
             )
-        if type(quantizer) is not QuaRotQuantizerConfig:
-            raise ValueError("QuaRot requires QuaRotQuantizerConfig")
         expected = "key_head" if kind == "key" else "value_group"
+        if type(quantizer) is IntQuantizerConfig:
+            # The merged integer quantizer must carry exactly QuaRot's numerics.
+            if quantizer != quarot_int_quantizer(
+                expected,
+                bits=quantizer.bits,
+                group_size=quantizer.group_size,
+                symmetric=quantizer.symmetric,
+                clip_ratio=quantizer.clip_ratio,
+            ):
+                raise ValueError(
+                    f"QuaRot {kind} with IntQuantizerConfig requires "
+                    f"quarot_int_quantizer('{expected}', ...)"
+                )
+            continue
+        if type(quantizer) is not QuaRotQuantizerConfig:
+            raise ValueError(
+                "QuaRot requires QuaRotQuantizerConfig or quarot_int_quantizer()"
+            )
         if quantizer.parameter_mode != expected:
             raise ValueError(f"QuaRot {kind} requires parameter_mode={expected}")
     if type(config.cache_policy) is not FullQuantizationCachePolicyConfig:

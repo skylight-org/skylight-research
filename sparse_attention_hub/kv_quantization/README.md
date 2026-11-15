@@ -115,15 +115,15 @@ kv_quantization/
 | `registry.py` | Independent config-type factories; implementations use their registration decorators |
 | `context.py` | `AttentionContext` and opt-in tracing; metadata only, no KV storage |
 | `transforms/` | `KVTransform`; working Identity, Hadamard, RandomHadamard and RandomRotation; LearnedRotation scaffolded |
-| `quantizers/` | `KVQuantizer`, `QuantGranularity`; working INT, KIVI, QuaRot, TurboQuant MSE/prod, FP8, FakeNVFP4, MXFP and nonuniform reference codecs; native NVFP4 scaffold |
+| `quantizers/` | `KVQuantizer`, `QuantGranularity`; working INT, KIVI, Kitty, QuaRot, TurboQuant MSE/prod, FP8, FakeNVFP4, MXFP and nonuniform reference codecs; native NVFP4 scaffold |
 | `policies/precision/` | `PrecisionPolicy`, `PrecisionPlan`; fixed bits, mixed-channel bits and optional exact-token preservation |
 | `policies/cache/` | `CachePolicy`, `RegionConfig` (sink/local size and quantizer), and six working policies (Default, SinkAndLocal, Kitty, SinkOnly, FullQuantization, LocalOnly) |
 | `cache/` | `QuantizedKVStore`, per-layer state, encoded tensor records and chunks |
 | `metrics/quant_error.py` | Optional reconstruction errors on quantized regions; stored tensor bytes |
-| `implementations/` | Implemented KIVI/QuaRotKV/TurboQuantKV recipes; KVQuantNUQ, Kitty and NVFP4KV declarations |
+| `implementations/` | Implemented KIVI/Kitty/QuaRotKV/TurboQuantKV recipes; KVQuantNUQ and NVFP4KV declarations |
 
 For example, `implementations/kivi.py` assembles the complete method from
-components, selecting `KIVIQuantizerConfig` by default and
+components, selecting `kivi_int_quantizer()` by default and
 `SinkAndLocalCachePolicyConfig` for buffering. Methods share
 components instead of defining new ones each time.
 
@@ -171,13 +171,60 @@ kv_config = KIVIConfig.with_settings(
 
 Pass this as `ResearchAttentionConfig(masker_configs=[],
 kv_quantization_config=kv_config)` for quantization-only experiments. The recipe
-uses a dedicated `KIVIQuantizer` based on the released code at
-`876b4d2d08e3b1d5f70d0969c299d8c7c42ddfb6`. Minima, ranges, scale division and
-rounding use the input dtype, and scale/minimum tensors keep that dtype. Exported
-configuration includes `parameter_dtype="input"` and the reference revision.
-Inherited `scale_dtype`/`offset_dtype` fields are unused by this codec and must
-remain at their defaults; use explicit `IntQuantizerConfig` overrides for
-experiments with independently chosen parameter dtypes.
+uses `IntQuantizer` with `kivi_int_quantizer()`, which reproduces
+the released code at `876b4d2d08e3b1d5f70d0969c299d8c7c42ddfb6` (see the next
+section). Minima, ranges, scale division and rounding use the input dtype, and
+scale/minimum tensors keep that dtype. Exported configuration records the
+preset's settings (`compute_dtype="input"`, `parameter_storage="compute"`, ...).
+Inherited `scale_dtype`/`offset_dtype` fields are unused by this preset; use a
+generic `IntQuantizerConfig` for experiments with independently chosen
+parameter dtypes.
+
+### One integer quantizer with the papers' arithmetic as settings
+
+`IntQuantizerConfig` keeps Skylight's generic arithmetic by default (FP32
+statistics, conservatively rounded FP16 parameters, record format
+`uniform_int_v1`). With `parameter_storage="compute"` its other settings select
+the operation order and dtype of a reference implementation (record format
+`uniform_int_v2`). `IntQuantizerConfig` itself holds no method presets: each
+recipe file has a helper that sets them exactly as the authors' code does and
+returns a plain `IntQuantizerConfig`:
+
+```python
+from sparse_attention_hub.kv_quantization import (
+    kitty_int_quantizer,   # implementations/kitty.py
+    kivi_int_quantizer,    # implementations/kivi.py
+    quarot_int_quantizer,  # implementations/quarot_kv.py
+)
+
+kivi_int_quantizer(bits=2, granularity=PER_CHANNEL, group_size=32)   # KIVI new_pack.py
+kitty_int_quantizer(bits=2, granularity=PER_CHANNEL, group_size=128) # Kitty kitty_sim (+ ChannelBoost)
+quarot_int_quantizer("key_head")      # QuaRot ActQuantizer, per-head keys (FP32)
+quarot_int_quantizer("value_group")   # QuaRot ActQuantizer, v_proj values
+```
+
+| Setting | Generic | `kivi_int_quantizer()` | `kitty_int_quantizer()` | `quarot_int_quantizer()` |
+|---|---|---|---|---|
+| `compute_dtype` | fp32 | input | input | key_head fp32, value_group input |
+| `parameter_storage` | rounded | compute | compute | compute |
+| `zero_point` | float | float | float | integer (`round(-min/scale)`) |
+| `clip_ratio` | 1.0 | 1.0 | 1.0 | 0.95 |
+| `range_includes_zero` | no | no | no | key_head yes |
+| `degenerate_range` | unit_scale | zero_scale | eps (1e-4 / 1e-6) | pm_one |
+| `rounding` | round_clamp | clamp_round | clamp_round | round_clamp |
+| `decode_dtype` | fp32 | fp16 | compute | compute |
+| `symmetric_range` | balanced | - | - | full (symmetric only) |
+| `complete_groups` | no | yes | yes | yes |
+
+These helpers build the recipes' defaults: `KIVIConfig`, `KittyConfig` and
+`QuaRotKVConfig` (and their `with_settings`) build `IntQuantizer`s. The dedicated
+`KIVIQuantizer`, `KittyQuantizer` and `QuaRotQuantizer` remain and are still
+accepted by the recipes. `tests/unit/kv_quantization/test_integer_reference_presets.py`
+checks each preset bit for bit (`torch.equal`) against the authors' pinned code
+and the dedicated quantizer, alone and inside the KIVI, Kitty and QuaRot recipes
+(`test_*_default_recipe_equals_the_dedicated_codec`, FAKE and PACKED).
+`QuaRotKVConfig` accepts `IntQuantizerConfig` only when it equals the matching
+`quarot_int_quantizer()` result. Packing (a uint8 bitstream) never changes values.
 
 Groups must be complete: R must be a positive multiple of the key group size,
 and the value group size must divide head_dim. The FP16 numerical path is checked
@@ -282,14 +329,16 @@ move to the middle:
 |---|---|---|
 | `DefaultCachePolicy` (default) | move the oldest `*_block_tokens` once local holds `local.tokens + block` | `local` to `local + block - 1` |
 | `SinkAndLocalCachePolicy` (KIVI's buffering) | keys: buffer `key_local.tokens` (R), then move whole multiples of R; values: exact rolling window | keys 0 to R-1, values exactly R |
-| `KittyCachePolicy` | the sink-and-local rule with 32 sinks by default (keys page out 128 at a time) | as KIVI, after the sinks |
+| `KittyCachePolicy` (Kitty's buffering) | 32 sinks; keys: once more than R (128) wait, full pages move, each page its own chunk; values: exact rolling window | keys 1 to R, values exactly R, after the sinks |
 | `SinkOnlyCachePolicy` | sinks only; every other token is quantized on arrival | sinks only |
 | `FullQuantizationCachePolicy` | no sinks, no local window; everything is quantized on arrival | none |
 | `LocalOnlyCachePolicy` | no sinks; an exact local window (blocks of 1 by default) | exactly `local.tokens` |
 
 To add a policy, subclass `CachePolicyConfig` (for any new settings) and `CachePolicy`,
 implement `next_chunk_tokens` and `min_move_tokens`, and register it with
-`@CachePolicyRegistry.register(...)`. A per-channel middle quantizer is rejected when a
+`@CachePolicyRegistry.register(...)`. Optionally override `page_tokens` to store the
+moved tokens as several chunks of that size (Kitty does this so that precision
+policies such as `ChannelBoost` decide per 128-token page). A per-channel middle quantizer is rejected when a
 policy would move fewer tokens than its `group_size` at once, because a one-token
 per-channel group reconstructs exactly and would silently skip quantization. Tokens that are already
 old when they arrive (for example, the context imported on the first call) go straight
@@ -331,7 +380,7 @@ not guarantee lower error for every individual vector.
 ## Intentionally pending
 
 Learned rotations, the native NVFP4 codec, coordinator-level calibration, and the
-KVQuantNUQ, Kitty and NVFP4KV paper recipes still raise
+KVQuantNUQ and NVFP4KV paper recipes still raise
 `NotImplementedError` when selected. Their classes, configs and registry entries
 are ready for focused implementations. Generic FP8/FakeNVFP4/MXFP/nonuniform
 codecs, ChannelBoost and OutlierTokenPolicy are implemented; their existence does
@@ -339,8 +388,8 @@ not establish paper-reference parity. KIVI's portable reference path is implemen
 and numerically checked. QuaRot KV also has a portable, source-checked
 accuracy-profile implementation; see its implementation note for scope.
 KIVI's shared buffer is `SinkAndLocalCachePolicy`.
-`KittyCachePolicy` is currently a generic helper whose value-page buffering and
-per-page precision selection still need correction for the released Kitty recipe.
+Kitty follows the authors' accuracy simulation (per-token value window, page-wise
+key boost); see `implementations/README.md`.
 KVQuant requires calibrated codebooks and per-element
 outliers; keys are quantized post-RoPE (no RoPE inversion). TurboQuantKV implements
 both uniform MSE and QJL-corrected prod profiles; fractional-bit outlier profiles

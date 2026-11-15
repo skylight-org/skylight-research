@@ -212,7 +212,7 @@ class TestMethodSchedulesAreSettings:
 
     @staticmethod
     def coordinator(method_config: KVQuantizationConfig) -> KVQuantization:
-        # The preset classes are still scaffolds; reuse their configured parts.
+        # Reuse only the presets' buffering parts (no precision policy).
         return KVQuantization.create_from_config(
             KVQuantizationConfig(
                 key_quantizer=method_config.key_quantizer,
@@ -240,7 +240,8 @@ class TestMethodSchedulesAreSettings:
         assert stats["value_recent_tokens"] == 128
 
     def test_kitty_sinks_key_pages_and_value_window(self):
-        kvq = self.coordinator(KittyConfig())
+        # Kitty's value group is the whole head; these test heads have DIM channels.
+        kvq = self.coordinator(KittyConfig.with_settings(group_size=DIM))
         k, v = history(330), history(330, seed=1)
         meta: dict = {}
         for t in range(1, 331):
@@ -248,5 +249,7 @@ class TestMethodSchedulesAreSettings:
             stats = layer_stats(meta)
             after_sink = max(0, t - 32)
             assert stats["key_sink_tokens"] == stats["value_sink_tokens"] == min(t, 32)
-            assert stats["key_recent_tokens"] == after_sink % 128
+            # Kitty flushes a key page when the 129th key arrives: 1..128 stay FP.
+            expected = after_sink if after_sink <= 128 else (after_sink - 1) % 128 + 1
+            assert stats["key_recent_tokens"] == expected
             assert stats["value_recent_tokens"] == min(after_sink, 128)

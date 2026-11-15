@@ -3,7 +3,6 @@
 import pytest
 
 from sparse_attention_hub.kv_quantization import (
-    KittyConfig,
     KVQuantization,
     KVQuantizationConfig,
     KVQuantizer,
@@ -20,7 +19,6 @@ pytestmark = pytest.mark.unit
 @pytest.mark.parametrize(
     "config",
     [
-        KittyConfig(),
         KVQuantNUQConfig(),
         NVFP4KVConfig(),
     ],

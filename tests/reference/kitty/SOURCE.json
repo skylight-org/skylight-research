@@ -1,0 +1,18 @@
+{
+  "repository": "https://github.com/Summer-Summer/Kitty",
+  "commit": "dfd2c07b407d6b407179359207c612ab631f3ed1",
+  "license": "MIT",
+  "files": {
+    "utils_quant.py.txt": {
+      "upstream_path": "src/kitty_sim/utils_quant.py",
+      "sha256": "6bb6df3bbfb702793cff79d712f908f7dee89ada66d3bffc399718b218bfc27a",
+      "bytes": 5639
+    },
+    "kitty_simulate.py.txt": {
+      "upstream_path": "src/kitty_sim/kitty_simulate.py",
+      "sha256": "c63d8bff512594a7bd5412b8c201e8a706b2757abbfabd8a95436b9f343ee133",
+      "bytes": 12874
+    }
+  },
+  "execution": "Tests run the authors' channel selection, fake quantization and KittyKVCache.update unchanged. transformers' CacheConfig and DynamicCache are replaced by minimal stubs (a name string and two lists), because the pinned file imports CacheConfig, which current transformers no longer provides."
+}

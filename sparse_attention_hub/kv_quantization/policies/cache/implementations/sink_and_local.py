@@ -1,4 +1,4 @@
-"""SinkAndLocalCachePolicy (KIVI-style) and KittyCachePolicy: buffered keys, rolling values."""
+"""SinkAndLocalCachePolicy (KIVI) and KittyCachePolicy: buffered keys, rolling values."""
 
 from dataclasses import dataclass, field
 
@@ -10,6 +10,7 @@ from ..base import (
     RegionConfig,
     move_beyond_window,
     move_full_buffers,
+    move_full_pages_past_buffer,
 )
 
 
@@ -62,8 +63,15 @@ class SinkAndLocalCachePolicy(CachePolicy):
 
 @dataclass(frozen=True)
 class KittyCachePolicyConfig(CachePolicyConfig):
-    """Kitty (MLSys 2026) buffering: 32 full-precision sinks, then keys wait in a
-    buffer until a 128-token page fills and values keep a rolling window of 128.
+    """Kitty (Xia et al., MLSys 2026) buffering, as in the authors' simulation.
+
+    The first ``key_sink`` / ``value_sink`` tokens (32) stay in full precision.
+    Keys then wait in a buffer of ``key_local.tokens`` (R = 128, one page): once
+    more than R keys wait, every full page moves to the middle, *page by page*, so
+    1 to R keys stay in full precision. Each page is encoded separately, so
+    ChannelBoost picks the boosted channels of every page. Values keep an exact
+    rolling window of ``value_local.tokens`` (128) and each older value moves as
+    soon as it leaves the window (KIVI-style values).
 
     Kitty's per-channel bit boost is a precision policy (``ChannelBoost``), not part
     of the buffering.
@@ -77,7 +85,7 @@ class KittyCachePolicyConfig(CachePolicyConfig):
 
 @CachePolicyRegistry.register(KittyCachePolicyConfig)
 class KittyCachePolicy(CachePolicy):
-    """Kitty's buffering; the same rule as ``SinkAndLocalCachePolicy``."""
+    """Kitty's page-wise key buffer and rolling value window."""
 
     def next_chunk_tokens(
         self,
@@ -86,7 +94,15 @@ class KittyCachePolicy(CachePolicy):
         *,
         phase: str = "before_attention",
     ) -> int:
-        return _buffered_keys_rolling_values(self, tensor_kind, state, phase)
+        if phase != "before_attention":
+            return 0
+        size = self.config.local(tensor_kind).tokens
+        if tensor_kind == "value":
+            return move_beyond_window(state.recent_tokens, size)
+        return move_full_pages_past_buffer(state.recent_tokens, size)
 
     def min_move_tokens(self, tensor_kind: str) -> int:
         return _min_move(self, tensor_kind)
+
+    def page_tokens(self, tensor_kind: str) -> int:
+        return self.config.local(tensor_kind).tokens if tensor_kind == "key" else 0

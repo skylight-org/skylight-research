@@ -6,6 +6,7 @@ import pytest
 import torch
 
 from sparse_attention_hub.kv_quantization import (
+    kivi_int_quantizer,
     CACHE_KEY,
     KIVI_REFERENCE_REVISION,
     IntQuantizer,
@@ -79,10 +80,20 @@ def test_exact_codes_parameters_and_reconstruction_match_official_functions(
     assert torch.equal(x, original)
 
 
-def test_default_recipe_selects_reference_codec_and_keeps_generic_codec_available():
+def test_default_recipe_selects_the_kivi_preset_and_keeps_other_codecs_available():
     quant = KVQuantization.create_from_config(KIVIConfig())
-    assert isinstance(quant.key_quantizer, KIVIQuantizer)
-    assert isinstance(quant.value_quantizer, KIVIQuantizer)
+    assert type(quant.key_quantizer) is IntQuantizer
+    assert type(quant.value_quantizer) is IntQuantizer
+    assert quant.config.value_quantizer == kivi_int_quantizer()
+    dedicated = KVQuantization.create_from_config(
+        KIVIConfig(
+            key_quantizer=KIVIQuantizerConfig(
+                bits=2, granularity=QuantGranularity.PER_CHANNEL
+            ),
+            value_quantizer=KIVIQuantizerConfig(bits=2),
+        )
+    )
+    assert type(dedicated.key_quantizer) is KIVIQuantizer
     x = torch.randn(2, 3, 32, 64, generator=torch.Generator().manual_seed(424)).half()
     reference = decode(encode(x, "value"), "value", dtype=x.dtype)
     assert torch.equal(quant.value_quantizer.fake_quantize(x), reference)

@@ -90,6 +90,14 @@ class CachePolicy(ABC):
     def min_move_tokens(self, tensor_kind: str) -> int:
         """Smallest number of tokens this policy moves to the middle at once."""
 
+    def page_tokens(self, tensor_kind: str) -> int:
+        """Encode moved tokens in pages of this many tokens (0: one chunk per move).
+
+        Each page is its own stored chunk, so per-chunk decisions (for example
+        ChannelBoost's boosted channels) are made page by page.
+        """
+        return 0
+
     def validate_quantizers(
         self,
         key_quantizer: KVQuantizerConfig,
@@ -135,6 +143,18 @@ def move_block_beyond_window(local_tokens: int, window: int, block: int) -> int:
 def move_full_buffers(local_tokens: int, buffer: int) -> int:
     """Move whole multiples of ``buffer`` (everything when ``buffer`` is 0)."""
     return local_tokens if buffer == 0 else local_tokens - local_tokens % buffer
+
+
+def move_full_pages_past_buffer(local_tokens: int, page: int) -> int:
+    """Move whole pages once the buffer holds more than one page.
+
+    Kitty's rule: keys wait until a page of ``page`` tokens is full *and* another
+    token has arrived, so 1 to ``page`` keys stay in full precision (a prompt that
+    fills an exact number of pages beyond the first moves them all).
+    """
+    if page == 0:
+        return local_tokens
+    return local_tokens - local_tokens % page if local_tokens > page else 0
 
 
 def move_beyond_window(local_tokens: int, window: int) -> int:
