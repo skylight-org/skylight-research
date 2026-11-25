@@ -93,7 +93,7 @@ For comprehensive examples and detailed masker implementations, see the [Researc
 
 ## 🔧 Optimizing Configurations
 
-The framework includes an optimization system using Ray Tune for hyperparameter search:
+The framework includes an optimization system using Ray Tune for hyperparameter search. **Note**: Ray Tune is required for optimization features but optional for basic sparse attention usage.
 
 ### Phase 1: Configuration Optimization
 

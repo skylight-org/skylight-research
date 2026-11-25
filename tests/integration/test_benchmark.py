@@ -466,9 +466,12 @@ class TestErrorHandlingIntegration:
             }
         )
 
-        # Use invalid path that should cause file creation to fail
-        invalid_path = "/invalid/nonexistent/path"
-
+        # Patch pandas to_csv to simulate a file write failure,
+        # making the test OS-independent (avoids Windows path quirks).
         with patch.object(benchmark, "_load_datasets", return_value=mock_data):
-            with pytest.raises((OSError, PermissionError, FileNotFoundError)):
-                benchmark.run_benchmark(mock_adapter, invalid_path)
+            with patch(
+                "pandas.DataFrame.to_csv",
+                side_effect=OSError("Permission denied: cannot write to path"),
+            ):
+                with pytest.raises((OSError, PermissionError, FileNotFoundError)):
+                    benchmark.run_benchmark(mock_adapter, "/invalid/nonexistent/path")

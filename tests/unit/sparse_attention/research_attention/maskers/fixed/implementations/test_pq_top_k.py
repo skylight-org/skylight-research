@@ -1246,12 +1246,9 @@ class TestPQCacheMaskerImplementation:
         )
 
         # Create previous mask (mark some positions as already active)
-        previous_mask: Mask = Mask.create_full_mask(
-            shape=(bsz, n_heads, seq_len_queries, seq_len_keys),
-            device=torch.device("cpu"),
-            dtype=torch.float32,
+        previous_dense: torch.Tensor = torch.zeros(
+            bsz, n_heads, seq_len_queries, seq_len_keys, dtype=torch.float32
         )
-        previous_dense: torch.Tensor = previous_mask.get_dense_mask()
         # Mark first 2 positions in quantized region as already active
         previous_dense[:, :, :, config.init_offset : config.init_offset + 2] = 1.0
         previous_mask = Mask(
