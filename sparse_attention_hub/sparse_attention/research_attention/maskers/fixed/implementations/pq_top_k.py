@@ -525,9 +525,10 @@ class PQCache(TopKMasker):
             masked_scores, k=effective_heavy_size, dim=-1, largest=True
         )
 
-        # Adjust indices to account for init_offset
         topk_indices_adjusted: torch.Tensor = topk_indices + self.init_offset
-
+        # remove duplicates within each row
+        topk_indices_adjusted = torch.sort(topk_indices_adjusted, dim=-1).values
+        topk_indices_adjusted = torch.unique_consecutive(topk_indices_adjusted, dim=-1)
         # Create mask from indices
         return self._create_mask_from_rowise_indices(
             dims,

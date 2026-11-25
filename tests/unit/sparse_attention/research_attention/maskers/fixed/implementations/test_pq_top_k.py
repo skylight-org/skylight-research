@@ -1246,7 +1246,7 @@ class TestPQCacheMaskerImplementation:
         )
 
         # Create previous mask (mark some positions as already active)
-        previous_mask: Mask = Mask.create_full_mask(
+        previous_mask: Mask = Mask.create_empty_mask(
             shape=(bsz, n_heads, seq_len_queries, seq_len_keys),
             device=torch.device("cpu"),
             dtype=torch.float32,

@@ -7,7 +7,8 @@ benchmarking tools, and integration with popular model frameworks.
 
 __version__ = "0.1.0"
 __author__ = "AlexCuadron"
-
+# Run compatibility shims early
+from . import compat  # type: ignore
 from .adapters import (
     ModelAdapter,
     ModelAdapterHF,
