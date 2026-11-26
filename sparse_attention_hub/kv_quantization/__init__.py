@@ -22,6 +22,8 @@ from .implementations.quarot_kv import (  # noqa: F401
 from .implementations.turboquant_kv import (  # noqa: F401
     TurboQuantKV,
     TurboQuantKVConfig,
+    TurboQuantSplitKV,
+    TurboQuantSplitKVConfig,
 )
 from .metrics.quant_error import QuantErrorMetric  # noqa: F401
 from .policies.cache.base import (  # noqa: F401
@@ -84,16 +86,6 @@ from .quantizers.implementations.integer import (  # noqa: F401
     IntQuantizer,
     IntQuantizerConfig,
 )
-from .quantizers.implementations.kitty import (  # noqa: F401
-    KITTY_REFERENCE_REVISION,
-    KittyQuantizer,
-    KittyQuantizerConfig,
-)
-from .quantizers.implementations.kivi import (  # noqa: F401
-    KIVI_REFERENCE_REVISION,
-    KIVIQuantizer,
-    KIVIQuantizerConfig,
-)
 from .quantizers.implementations.mxfp import (  # noqa: F401
     MXFPQuantizer,
     MXFPQuantizerConfig,
@@ -106,17 +98,16 @@ from .quantizers.implementations.nvfp4 import (  # noqa: F401
     NVFP4Quantizer,
     NVFP4QuantizerConfig,
 )
-from .quantizers.implementations.quarot import (  # noqa: F401
-    QUAROT_REFERENCE_REVISION,
-    QuaRotQuantizer,
-    QuaRotQuantizerConfig,
-)
 from .quantizers.implementations.turboquant import (  # noqa: F401
     TURBOQUANT_NUMERICS,
     TURBOQUANT_REFERENCE,
     TurboQuantQuantizer,
     TurboQuantQuantizerConfig,
     turboquant_codebook,
+)
+from .quantizers.implementations.turboquant_codebook import (  # noqa: F401
+    TurboQuantCodebookQuantizer,
+    TurboQuantCodebookQuantizerConfig,
 )
 from .registry import (  # noqa: F401
     CachePolicyRegistry,

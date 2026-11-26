@@ -14,8 +14,6 @@ from sparse_attention_hub.kv_quantization import (
     IntQuantizerConfig,
     KittyCachePolicyConfig,
     KIVIConfig,
-    KIVIQuantizer,
-    KIVIQuantizerConfig,
     KVQuantization,
     KVQuantizationConfig,
     OutlierTokenPolicyConfig,
@@ -102,8 +100,8 @@ class TestNumerics:
         k, v = history(300), history(300, seed=1)
         generic = KVQuantization.create_from_config(
             KVQuantizationConfig(
-                key_quantizer=KIVIQuantizerConfig(bits=2, granularity=PER_CHANNEL),
-                value_quantizer=KIVIQuantizerConfig(bits=2),
+                key_quantizer=kivi_int_quantizer(bits=2, granularity=PER_CHANNEL),
+                value_quantizer=kivi_int_quantizer(bits=2),
                 cache_policy=SinkAndLocalCachePolicyConfig(),
             )
         )

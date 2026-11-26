@@ -11,6 +11,7 @@ parent package. The generic baseline is configured through
 | [Kitty](#kitty) | `KittyConfig` / `Kitty` | [kitty.py](kitty.py) | Implemented; bit-exact with the authors' accuracy simulation |
 | [QuaRot KV](#quarot-kv) | `QuaRotKVConfig` / `QuaRotKV` | [quarot_kv.py](quarot_kv.py) | Implemented portable accuracy-profile KV path |
 | [TurboQuant KV](#turboquant-kv) | `TurboQuantKVConfig` / `TurboQuantKV` | [turboquant_kv.py](turboquant_kv.py) | Implemented portable MSE/prod mathematical profiles |
+| [TurboQuant KV, split](#split-rotation-and-codebook) | `TurboQuantSplitKVConfig` / `TurboQuantSplitKV` | [turboquant_kv.py](turboquant_kv.py) | Implemented; rotation as a transform, codebook as a quantizer |
 | KVQuant NUQ | `KVQuantNUQConfig` / `KVQuantNUQ` | [kvquant_nuq.py](kvquant_nuq.py) | Scaffold |
 | NVFP4 KV | `NVFP4KVConfig` / `NVFP4KV` | [nvfp4_kv.py](nvfp4_kv.py) | Scaffold |
 
@@ -22,9 +23,8 @@ its recipe is implemented.
 ## KIVI
 
 The KIVI recipe uses `IntQuantizer` with `kivi_int_quantizer()` (defined in `kivi.py`)
-(the released arithmetic) and the shared request-local cache store. The dedicated
-`KIVIQuantizer` gives the same numbers and is still accepted; the generic integer
-arithmetic remains available for experiments.
+(the released arithmetic) and the shared request-local cache store. The generic
+integer arithmetic remains available for experiments.
 
 ### Reference
 
@@ -43,7 +43,6 @@ mandate the dtype of every intermediate operation.
 |---|---|
 | [Recipe](kivi.py) | `KIVIConfig`, default components and configuration validation |
 | [Quantizer](../quantizers/implementations/integer.py) | `IntQuantizer`, configured by `kivi_int_quantizer()` in the recipe (default): native-dtype encoding, unpacking and finite-value checks |
-| [Dedicated quantizer](../quantizers/implementations/kivi.py) | `KIVIQuantizerConfig`: the same arithmetic as a separate codec |
 | [Coordinator](../base.py) | Prepare attention K/V before updating and compressing the store |
 | [Store](../cache/store.py) | Independent per-layer K/V histories and compressed/full-precision chunks |
 | [Cache policy](../policies/cache/implementations/sink_and_local.py) | Buffered keys and rolling full-precision values |
@@ -75,7 +74,7 @@ before the persistent store is updated.
 Run from the repository root in the project's Python environment:
 
 ```bash
-python -m pytest -q tests/unit/kv_quantization/test_kivi_reference.py
+python -m pytest -q tests/unit/kv_quantization/test_integer_reference_presets.py
 python -m pytest -q tests/integration/test_kivi_reference_flow.py
 python -m pytest -q -m unit tests/unit/kv_quantization
 python -m pytest -q -m integration tests/integration/test_kv_quantization*.py tests/integration/test_kivi_reference_flow.py
@@ -135,8 +134,7 @@ The pinned files are vendored, hash-checked, in `tests/reference/kitty/`.
 | Values | newest 128 in full precision; older ones per token, 2 bits, group = whole head (128) | `KittyCachePolicy` value window + `kitty_int_quantizer(bits=2, group_size=128)` |
 | Current call | attends to its exact K/V, quantized afterwards (`PostQuant=True`) | the shared coordinator's default flow |
 
-Arithmetic (`kitty_int_quantizer()` in `kitty.py`; the dedicated `KittyQuantizer` in
-`quantizers/implementations/kitty.py` gives the same numbers) stays in the input
+Arithmetic (`kitty_int_quantizer()` in `kitty.py`) stays in the input
 dtype like the reference: `scale = max(max - min, eps) / (2^b - 1)` with eps 1e-4 for
 FP16/BF16, `q = round(clamp((x - min) / scale, 0, 2^b - 1))`, `x~ = q * scale + min`.
 
@@ -151,12 +149,12 @@ KittyConfig.with_settings(boost_fraction=0)     # the paper's KIVI* baseline (si
 KittyConfig.with_settings(channel_selection="random")   # ablation; also "variance"
 ```
 
-`ChannelBoost`, `KittyQuantizer` and `KittyCachePolicy` also compose freely in a
+`ChannelBoost`, `IntQuantizer` and `KittyCachePolicy` also compose freely in a
 plain `KVQuantizationConfig`. `validate_kitty` only guards the named recipe.
 
 ### Tests
 
-- `tests/unit/kv_quantization/test_kitty_reference.py`: key pages (12.5/25/10/20%,
+- `tests/unit/kv_quantization/test_integer_reference_presets.py`: key pages (12.5/25/10/20%,
   magnitude and variance selection) and values are **bit-identical** to the
   authors' `build_promote_mask` + `fake_quant_groupwise_lastdim` in FP16 and BF16;
   the attention K/V of every prefill and decode step equal the authors'
@@ -193,11 +191,9 @@ The reference is [spcl/QuaRot](https://github.com/spcl/QuaRot) at commit
   head-wise key and grouped value quantizer installation.
 - [Paper](https://arxiv.org/pdf/2404.00456): experimental setup and KV-only ablation.
 
-The numerical functions and ActQuantizer are adapted directly into our
-[quantizer](../quantizers/implementations/quarot.py), with type annotations and
-a local no-op cleanup shim instead of upstream experiment dependencies. Their
-numerical bodies are checked against the pinned source. There is no vendor
-package. Apache-2.0 attribution/license is retained in
+ActQuantizer's arithmetic is reproduced by `IntQuantizer` configured with
+`quarot_int_quantizer()` (in [quarot_kv.py](quarot_kv.py)), checked bit for bit
+against the pinned source. There is no vendor package. Apache-2.0 attribution/license is retained in
 [LICENSE-QUAROT](../LICENSE-QUAROT) and packaged with the library.
 
 ### Defaults and numerical behavior
@@ -240,7 +236,7 @@ undefined reference cases; no epsilon is silently added to the quantizer.
 | File | Responsibility |
 |---|---|
 | [Recipe](quarot_kv.py) | Configuration, validation, process override selecting current-token reconstruction |
-| [Quantizer](../quantizers/implementations/quarot.py) | Adapted authors' numerics, native arithmetic dtypes, compact parameters and record validation |
+| [Quantizer](../quantizers/implementations/integer.py) | `IntQuantizer` with `quarot_int_quantizer()`: the authors' numerics, native arithmetic dtypes and compact parameters |
 | [Hadamard transform](../transforms/implementations/hadamard.py) | Shared matrix/inverse with optional forward dtype preservation |
 | [Packing](../quantizers/common.py) | Cross-byte bitstream packing/unpacking; existing codecs retain their layout |
 | [Coordinator](../base.py) | Shared _process_kv_history helper; default process preserves KIVI's exact-current ordering |
@@ -263,8 +259,7 @@ ResearchAttention and its maskers require no rotation-specific edits.
 This changes floating-point operation order: the authors rotate Q explicitly
 and incorporate V rotations into projection weights. Our original-coordinate
 reconstruction is not claimed bit-identical to that full model preparation.
-The codec (`quarot_int_quantizer()` by default, or the dedicated
-`QuaRotQuantizer`) is checked exactly on the same rotated input.
+The codec (`quarot_int_quantizer()`) is checked exactly on the same rotated input.
 
 Prefill keeps the native mask format when token positions/lengths are unchanged.
 For longer independent history, eager/SDPA prefill uses the existing mask alignment
@@ -292,7 +287,7 @@ Setting quantize_prefill=False is an explicit native-prefill experiment.
 ~~~bash
 python tutorials/py_examples/06_quarot_kv_demo.py --device cpu
 python tutorials/py_examples/06_quarot_kv_demo.py --device cpu --bits 3
-python -m pytest -q tests/unit/kv_quantization/test_quarot_reference.py tests/unit/kv_quantization/test_quarot_preset.py tests/unit/kv_quantization/test_bitstream_packing.py
+python -m pytest -q tests/unit/kv_quantization/test_integer_reference_presets.py tests/unit/kv_quantization/test_quarot_preset.py tests/unit/kv_quantization/test_bitstream_packing.py
 python -m pytest -q -m integration tests/integration/test_kv_quantization_quarot_flow.py
 python -m pytest -q -m unit tests/unit/kv_quantization
 python -m pytest -q -m integration tests/integration/test_kv_quantization*.py tests/integration/test_kivi_reference_flow.py
@@ -405,6 +400,40 @@ copies. Records carry table/matrix fingerprints; incompatible decoders reject
 rather than silently interpreting codes with different resources. Fingerprints
 also detect RNG/QR differences across runtime versions when moving records.
 
+### Outlier-channel split (2.5 / 3.5 bits)
+
+The paper's KV results use fractional bit-widths: it splits each head's channels
+into outliers and the rest and runs two independent TurboQuant instances.
+`TurboQuantKVConfig.outlier_split(2.5)` / `outlier_split(3.5)` build this:
+
+| Preset | Outlier channels | Outlier bits | Other bits | Average |
+|---|---|---|---|---|
+| `outlier_split(2.5)` | 64 of 128 | 3 | 2 | (64·3 + 64·2) / 128 = 2.5 |
+| `outlier_split(3.5)` | 64 of 128 | 4 | 3 | (64·4 + 64·3) / 128 = 3.5 |
+
+The paper's own 2.5-bit example (32 channels at 3 bits + 96 at 2 bits) works
+out to 288 / 128 = 2.25 bits, and it gives no 3.5-bit ratio, so both splits are
+our choice of a true average.
+
+~~~text
+first chunk of a request (prefill), per layer, K/V and head:
+  ChannelBoost(freeze="prefill") -> top channels by mean |x| -> channel_bits
+later chunks (decode tokens): the same channel_bits object is reused
+
+TurboQuantQuantizer.quantize(x, plan with channel_bits):
+  outlier channels -> norm -> own rotation -> codebook(k dims, high bits) [+ QJL]
+  other channels   -> norm -> own rotation -> codebook(d-k dims, low bits) [+ QJL]
+  record: two code streams, norms [..., 2], outlier_indices [batch, heads, k]
+dequantize: decode both groups, scatter back to the original channel order
+~~~
+
+- Each group gets its own seeded rotation and QJL matrix, so equal-sized groups
+  (64 / 64) never share one. Without `channel_bits` the codec is unchanged.
+- The split happens before rotation; `TurboQuantSplitKV` (rotation as a
+  transform over all channels) does not support it.
+- The outlier index is shared by every record of a request, and
+  `QuantizedKVStore.stats()` counts it once per (layer, K/V).
+
 ### Files and flow
 
 | File | Responsibility |
@@ -431,6 +460,27 @@ subsequent calls. Completed history is not requantized. Our cache retains full
 history while the existing adapter/attention mask alignment preserves native
 sliding/padding visibility. ResearchAttention, HF's cache class and its query
 handling need no additional edits for TurboQuant.
+
+### Split rotation and codebook
+
+`TurboQuantSplitKVConfig` runs the same algorithm with its two stages as
+separate components:
+
+~~~text
+HF K/V -> RandomRotation transform (y = x R, FP32)
+  -> TurboQuantCodebookQuantizer: normalize -> codebook index / optional QJL residual
+  -> packed store -> decode -> inverse transform (R^T) -> original-coordinate K/V
+~~~
+
+With the same seed, `RandomRotation` builds the same matrices as the bundled
+codec, so MSE indices agree except where FP32 rounding of normalize-then-rotate
+vs rotate-then-normalize moves a coordinate across a codebook boundary. For
+`prod`, the residual is in rotated coordinates, so the effective QJL projection
+is `S R` instead of `S`; both are i.i.d. Gaussian, so the estimator is the same
+(an injected `S R` reproduces the bundled signs). The codebook is only right for
+randomly rotated input, so the recipe requires `RandomRotationConfig` in both
+transform slots. Tests: `tests/unit/kv_quantization/test_turboquant_split.py`.
+The bundled `TurboQuantKVConfig` is unchanged.
 
 ### Storage and configuration
 

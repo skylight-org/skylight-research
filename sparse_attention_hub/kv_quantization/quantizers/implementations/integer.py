@@ -699,7 +699,7 @@ class IntQuantizer(KVQuantizer):
             restored = codes * scales + offsets  # KIVI/Kitty: data * scale + mn
             if decode == "fp16" and not torch.isfinite(restored).all():
                 # A half intermediate may overflow where the wide result is
-                # finite; keep the wide value (KIVIQuantizer's rule).
+                # finite; keep the wide value (KIVI's rule).
                 wide = codes.float() * scales.float() + offsets.float()
                 restored = torch.where(torch.isfinite(restored), restored.float(), wide)
         return finite_cast(

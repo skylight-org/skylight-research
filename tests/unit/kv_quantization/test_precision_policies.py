@@ -186,7 +186,13 @@ class TestChannelBoost:
             coordinator(ChannelBoostConfig(), key_quantizer=FakeNVFP4QuantizerConfig())
 
     @pytest.mark.parametrize(
-        "kwargs", [{"fraction": 0.0}, {"boosted_bits": 3}, {"kinds": ("query",)}]
+        "kwargs",
+        [
+            {"fraction": 0.0},
+            {"boosted_bits": 5},
+            {"kinds": ("query",)},
+            {"freeze": "always"},
+        ],
     )
     def test_invalid_settings(self, kwargs):
         with pytest.raises(ValueError):

@@ -248,12 +248,17 @@ def test_invalid_input_context_and_plans_are_rejected():
     for plan in (PrecisionPlan(4), PrecisionPlan(True)):
         with pytest.raises(ValueError):
             codec.quantize(x, plan, context=CONTEXT)
-    for plan in (
-        PrecisionPlan(3, keep_tokens=torch.zeros(1, 1, 2, dtype=torch.bool)),
-        PrecisionPlan(3, channel_bits=torch.ones(1, 1, 16)),
+    with pytest.raises(NotImplementedError):
+        plan = PrecisionPlan(3, keep_tokens=torch.zeros(1, 1, 2, dtype=torch.bool))
+        codec.quantize(x, plan, context=CONTEXT)
+    # channel_bits (the outlier split) is supported, but only as two integer
+    # widths: the configured bits and a larger one.
+    for channel_bits in (
+        torch.ones(1, 1, 16),
+        torch.full((1, 1, 16), 3, dtype=torch.int64),
     ):
-        with pytest.raises(NotImplementedError):
-            codec.quantize(x, plan, context=CONTEXT)
+        with pytest.raises(ValueError):
+            codec.quantize(x, PrecisionPlan(3, channel_bits=channel_bits), context=CONTEXT)
 
 
 @pytest.mark.parametrize(

@@ -19,7 +19,7 @@ from sparse_attention_hub.kv_quantization import (
     KIVIConfig,
     KVQuantizationConfig,
     QuaRotKVConfig,
-    QuaRotQuantizerConfig,
+    quarot_int_quantizer,
     RegionConfig,
     TurboQuantKVConfig,
     TurboQuantQuantizerConfig,
@@ -47,10 +47,8 @@ def test_invalid_decode_releases_prefill_store(
 ):
     config = (
         QuaRotKVConfig(
-            key_quantizer=QuaRotQuantizerConfig(
-                group_size=32, parameter_mode="key_head"
-            ),
-            value_quantizer=QuaRotQuantizerConfig(group_size=32),
+            key_quantizer=quarot_int_quantizer("key_head", group_size=32),
+            value_quantizer=quarot_int_quantizer("value_group", group_size=32),
         )
         if method_name == "quarot"
         else TurboQuantKVConfig()
@@ -148,10 +146,8 @@ def test_real_benchmark_worker_with_local_model_and_saved_outputs(
         )
     elif isinstance(codec, str):
         quant = QuaRotKVConfig(
-            key_quantizer=QuaRotQuantizerConfig(
-                group_size=32, parameter_mode="key_head"
-            ),
-            value_quantizer=QuaRotQuantizerConfig(group_size=32),
+            key_quantizer=quarot_int_quantizer("key_head", group_size=32),
+            value_quantizer=quarot_int_quantizer("value_group", group_size=32),
             store_codes=packed,
             error_metric=True,
         )

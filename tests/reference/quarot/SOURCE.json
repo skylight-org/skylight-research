@@ -17,7 +17,7 @@
     }
   },
   "production_adaptations": [
-    "numerical definitions copied to quantizers/implementations/quarot.py",
+    "numerics reproduced by IntQuantizer with quarot_int_quantizer() (implementations/quarot_kv.py)",
     "torch-only imports; local no-op cleanup shim; numerical bodies unchanged",
     "Skylight configuration, validation, compact parameters and bitstream storage"
   ],

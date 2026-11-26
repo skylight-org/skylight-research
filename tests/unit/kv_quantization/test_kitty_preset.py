@@ -8,12 +8,11 @@ from sparse_attention_hub.kv_quantization import (
     CACHE_KEY,
     ChannelBoostConfig,
     FixedPrecisionConfig,
+    IntQuantizer,
     IntQuantizerConfig,
     Kitty,
     KittyCachePolicyConfig,
     KittyConfig,
-    KittyQuantizer,
-    KittyQuantizerConfig,
     KVQuantization,
     KVQuantizationConfig,
     QuantGranularity,
@@ -81,9 +80,9 @@ class TestConfig:
         "kwargs, message",
         [
             ({"cache_policy": SinkAndLocalCachePolicyConfig()}, "KittyCachePolicyConfig"),
-            ({"key_quantizer": KittyQuantizerConfig(bits=2)}, "per channel"),
+            ({"key_quantizer": kitty_int_quantizer(bits=2)}, "per channel"),
             (
-                {"value_quantizer": KittyQuantizerConfig(granularity=PER_CHANNEL)},
+                {"value_quantizer": kitty_int_quantizer(granularity=PER_CHANNEL)},
                 "values per token",
             ),
             (
@@ -173,9 +172,7 @@ class TestStorage:
 
     def test_packed_key_page_size(self):
         # 2 heads x 128 channels x 128 tokens: 16 channels per head at 4 bits.
-        quantizer = KittyQuantizer(
-            KittyQuantizerConfig(bits=2, granularity=PER_CHANNEL, group_size=128)
-        )
+        quantizer = IntQuantizer(kitty_int_quantizer(bits=2, granularity=PER_CHANNEL))
         from sparse_attention_hub.kv_quantization import ChannelBoost
         from sparse_attention_hub.kv_quantization.implementations.kitty import (
             kitty_channel_boost,
@@ -192,19 +189,9 @@ class TestStorage:
         assert record.storage_bytes() == code_bytes + 2 * 128 * (2 + 2) + 2 * 128
 
     def test_rejects_incomplete_groups(self):
-        quantizer = KittyQuantizer(
-            KittyQuantizerConfig(bits=2, granularity=PER_CHANNEL, group_size=128)
-        )
-        with pytest.raises(ValueError, match="complete groups"):
+        quantizer = IntQuantizer(kitty_int_quantizer(bits=2, granularity=PER_CHANNEL))
+        with pytest.raises(ValueError, match="complete_groups"):
             quantizer.quantize(kv(100)[0])
-
-    @pytest.mark.parametrize(
-        "kwargs",
-        [{"bits": 0}, {"symmetric": True}, {"range_eps": 0.0}, {"group_size": 0}],
-    )
-    def test_invalid_quantizer_settings(self, kwargs):
-        with pytest.raises(ValueError):
-            KittyQuantizer(KittyQuantizerConfig(**kwargs))
 
 
 def test_generic_coordinator_accepts_kitty_parts():

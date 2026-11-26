@@ -217,12 +217,10 @@ quarot_int_quantizer("value_group")   # QuaRot ActQuantizer, v_proj values
 | `complete_groups` | no | yes | yes | yes |
 
 These helpers build the recipes' defaults: `KIVIConfig`, `KittyConfig` and
-`QuaRotKVConfig` (and their `with_settings`) build `IntQuantizer`s. The dedicated
-`KIVIQuantizer`, `KittyQuantizer` and `QuaRotQuantizer` remain and are still
-accepted by the recipes. `tests/unit/kv_quantization/test_integer_reference_presets.py`
-checks each preset bit for bit (`torch.equal`) against the authors' pinned code
-and the dedicated quantizer, alone and inside the KIVI, Kitty and QuaRot recipes
-(`test_*_default_recipe_equals_the_dedicated_codec`, FAKE and PACKED).
+`QuaRotKVConfig` (and their `with_settings`) build `IntQuantizer`s, and the recipes
+accept only `IntQuantizerConfig`. `tests/unit/kv_quantization/test_integer_reference_presets.py`
+checks each preset bit for bit (`torch.equal`) against the authors' pinned code,
+alone and inside the KIVI, Kitty and QuaRot recipes.
 `QuaRotKVConfig` accepts `IntQuantizerConfig` only when it equals the matching
 `quarot_int_quantizer()` result. Packing (a uint8 bitstream) never changes values.
 

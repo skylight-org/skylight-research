@@ -20,7 +20,7 @@ from sparse_attention_hub.adapters.huggingface import ModelAdapterHF
 from sparse_attention_hub.kv_quantization import (
     CACHE_KEY,
     QuaRotKVConfig,
-    QuaRotQuantizerConfig,
+    quarot_int_quantizer,
 )
 from sparse_attention_hub.sparse_attention.research_attention import (
     ResearchAttention,
@@ -40,10 +40,8 @@ def run_case(model, *, packed, bits):
             ResearchAttentionConfig(
                 masker_configs=[],
                 kv_quantization_config=QuaRotKVConfig(
-                    key_quantizer=QuaRotQuantizerConfig(
-                        bits=bits, parameter_mode="key_head"
-                    ),
-                    value_quantizer=QuaRotQuantizerConfig(bits=bits),
+                    key_quantizer=quarot_int_quantizer("key_head", bits=bits),
+                    value_quantizer=quarot_int_quantizer("value_group", bits=bits),
                     store_codes=packed,
                 ),
             )

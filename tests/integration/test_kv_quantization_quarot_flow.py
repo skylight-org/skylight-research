@@ -20,7 +20,7 @@ from sparse_attention_hub.adapters.huggingface import ModelAdapterHF
 from sparse_attention_hub.kv_quantization import (
     CACHE_KEY,
     QuaRotKVConfig,
-    QuaRotQuantizerConfig,
+    quarot_int_quantizer,
 )
 from sparse_attention_hub.sparse_attention.research_attention import (
     ResearchAttention,
@@ -33,10 +33,8 @@ pytestmark = pytest.mark.integration
 
 def config_for_dimension(dimension, *, packed=True, quantize_prefill=True, bits=4):
     return QuaRotKVConfig(
-        key_quantizer=QuaRotQuantizerConfig(
-            group_size=dimension, bits=bits, parameter_mode="key_head"
-        ),
-        value_quantizer=QuaRotQuantizerConfig(group_size=dimension, bits=bits),
+        key_quantizer=quarot_int_quantizer("key_head", group_size=dimension, bits=bits),
+        value_quantizer=quarot_int_quantizer("value_group", group_size=dimension, bits=bits),
         store_codes=packed,
         quantize_prefill=quantize_prefill,
     )

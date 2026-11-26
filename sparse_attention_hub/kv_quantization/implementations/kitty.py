@@ -9,7 +9,7 @@ K/V and quantization happens after it (the reference's ``PostQuant``).
 
 Parts: IntQuantizer with ``kitty_int_quantizer()`` (keys and values) +
 ChannelBoost (precision policy) + KittyCachePolicy (sinks, page-wise key buffer,
-value window). KittyQuantizerConfig (the dedicated codec) gives the same numbers.
+value window).
 """
 
 from dataclasses import dataclass, field
@@ -26,7 +26,6 @@ from ..policies.precision.implementations.channel_boost import (
 from ..policies.precision.implementations.fixed import FixedPrecisionConfig
 from ..quantizers.base import KVQuantizerConfig, QuantGranularity
 from ..quantizers.implementations.integer import IntQuantizerConfig
-from ..quantizers.implementations.kitty import KittyQuantizerConfig
 from ..registry import KVQuantizationRegistry
 
 
@@ -158,12 +157,10 @@ class Kitty(KVQuantization):
 def validate_kitty(config: KVQuantizationConfig) -> None:
     """Raise if ``config`` breaks what defines Kitty (other settings are free)."""
     keys, values = config.key_quantizer, config.value_quantizer
-    integer = (KittyQuantizerConfig, IntQuantizerConfig)
-    if not isinstance(keys, integer) or not isinstance(values, integer):
-        raise ValueError(
-            "Kitty uses integer quantizers (KittyQuantizerConfig or "
-            "IntQuantizerConfig) for K and V"
-        )
+    if not isinstance(keys, IntQuantizerConfig) or not isinstance(
+        values, IntQuantizerConfig
+    ):
+        raise ValueError("Kitty uses integer quantizers (IntQuantizerConfig) for K and V")
     if QuantGranularity(keys.granularity) != QuantGranularity.PER_CHANNEL:
         raise ValueError("Kitty quantizes keys per channel (PER_CHANNEL)")
     if QuantGranularity(values.granularity) == QuantGranularity.PER_CHANNEL:

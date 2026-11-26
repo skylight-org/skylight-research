@@ -10,7 +10,6 @@ from ..policies.cache.implementations.sink_and_local import (
 )
 from ..quantizers.base import KVQuantizerConfig, QuantGranularity
 from ..quantizers.implementations.integer import IntQuantizerConfig
-from ..quantizers.implementations.kivi import KIVIQuantizerConfig
 from ..registry import KVQuantizationRegistry
 
 
@@ -110,8 +109,7 @@ class KIVI(KVQuantization):
     """The KIVI recipe: generic components with KIVI's settings and checks.
 
     The default codec is IntQuantizer with ``kivi_int_quantizer()``, with shared
-    buffering and storage. KIVIQuantizerConfig (the dedicated codec) gives the
-    same numbers. A plain IntQuantizerConfig (Skylight's generic arithmetic) is
+    buffering and storage. A plain IntQuantizerConfig (Skylight's generic arithmetic) is
     allowed for labelled experiments; it does not claim reference parity.
     """
 
@@ -123,12 +121,10 @@ class KIVI(KVQuantization):
 def validate_kivi(config: KVQuantizationConfig) -> None:
     """Raise if ``config`` breaks what defines KIVI (other settings are free)."""
     keys, values = config.key_quantizer, config.value_quantizer
-    if not isinstance(
-        keys, (IntQuantizerConfig, KIVIQuantizerConfig)
-    ) or not isinstance(values, (IntQuantizerConfig, KIVIQuantizerConfig)):
-        raise ValueError(
-            "KIVI uses integer quantizers (KIVIQuantizerConfig or IntQuantizerConfig) for K and V"
-        )
+    if not isinstance(keys, IntQuantizerConfig) or not isinstance(
+        values, IntQuantizerConfig
+    ):
+        raise ValueError("KIVI uses integer quantizers (IntQuantizerConfig) for K and V")
     if QuantGranularity(keys.granularity) != QuantGranularity.PER_CHANNEL:
         raise ValueError("KIVI quantizes keys per channel (PER_CHANNEL)")
     if QuantGranularity(values.granularity) == QuantGranularity.PER_CHANNEL:

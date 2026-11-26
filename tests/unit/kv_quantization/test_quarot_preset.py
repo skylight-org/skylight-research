@@ -9,14 +9,14 @@ from sparse_attention_hub.kv_quantization import (
     CACHE_KEY,
     DefaultCachePolicyConfig,
     HadamardTransformConfig,
+    IntQuantizer,
     IntQuantizerConfig,
     KIVIConfig,
     KVQuantization,
     OutlierTokenPolicyConfig,
     QuaRotKV,
     QuaRotKVConfig,
-    QuaRotQuantizer,
-    QuaRotQuantizerConfig,
+    quarot_int_quantizer,
 )
 from tests.reference.quarot import reconstruct
 
@@ -25,8 +25,8 @@ pytestmark = pytest.mark.unit
 
 def small_config(*, packed=True, quantize_prefill=True):
     return QuaRotKVConfig(
-        key_quantizer=QuaRotQuantizerConfig(group_size=16, parameter_mode="key_head"),
-        value_quantizer=QuaRotQuantizerConfig(group_size=8),
+        key_quantizer=quarot_int_quantizer("key_head", group_size=16),
+        value_quantizer=quarot_int_quantizer("value_group", group_size=8),
         store_codes=packed,
         quantize_prefill=quantize_prefill,
     )
@@ -48,7 +48,7 @@ def expected(keys, values):
 def test_registry_flow_uses_reconstructed_prefill_and_current_tokens(packed):
     method = KVQuantization.create_from_config(small_config(packed=packed))
     assert type(method) is QuaRotKV
-    assert type(method.key_quantizer) is QuaRotQuantizer
+    assert type(method.key_quantizer) is IntQuantizer
     keys, values = inputs()
     metadata = {}
     for end, count in [(4, 4), (5, 1), (8, 3), (9, 1)]:
@@ -132,7 +132,7 @@ def test_kivi_inherits_base_process_and_preserves_its_arriving_tokens():
     [
         {"key_transform": HadamardTransformConfig()},
         {"key_quantizer": IntQuantizerConfig(group_size=16)},
-        {"key_quantizer": QuaRotQuantizerConfig(group_size=16)},
+        {"key_quantizer": quarot_int_quantizer("value_group", group_size=16)},
         {"cache_policy": DefaultCachePolicyConfig()},
         {"precision_policy": OutlierTokenPolicyConfig()},
         {"quantize_prefill": 1},

@@ -211,8 +211,33 @@ class QuantizedKVStore:
         )
         return int(chunk.quantized.storage_bytes() + kept)
 
+    @staticmethod
+    def _shared_outlier_bytes(chunks: Any, seen: Dict[Any, int]) -> int:
+        """Bytes of tensors that several records share (a frozen TurboQuant
+        channel choice in ``outlier_indices``, a frozen channel mean in
+        ``zero_points``): subtract them per record, add each distinct storage
+        once through ``seen``."""
+        repeated = 0
+        for chunk in chunks:
+            record = chunk.quantized
+            if record is None or not record.format_id.startswith("turboquant_"):
+                continue
+            shared = []
+            if record.outlier_indices is not None and record.format_id.endswith(
+                "_outlier_v1"
+            ):
+                shared.append(record.outlier_indices)
+            if record.zero_points is not None and record.metadata.get("centered"):
+                shared.append(record.zero_points)
+            for tensor in shared:
+                repeated += int(tensor.numel() * tensor.element_size())
+                storage = tensor.untyped_storage()
+                seen[(tensor.device, storage.data_ptr())] = storage.nbytes()
+        return repeated
+
     def stats(self) -> Dict[str, Any]:
         owned_bytes = 0
+        shared: Dict[Any, int] = {}
         layers = {}
         for index, layer in self.layers.items():
             info = {"seen_tokens": layer.seen_tokens}
@@ -224,10 +249,11 @@ class QuantizedKVStore:
                 info[f"{kind}_encoded_tokens"] = sum(
                     end - start for start, end in state.encoded_ranges()
                 )
-                owned_bytes += sum(
-                    self._chunk_bytes(chunk) for chunk in state.all_chunks()
-                )
+                chunks = list(state.all_chunks())
+                owned_bytes += sum(self._chunk_bytes(chunk) for chunk in chunks)
+                owned_bytes -= self._shared_outlier_bytes(chunks, shared)
             layers[index] = info
+        owned_bytes += sum(shared.values())
         return {"store_bytes": owned_bytes, "layers": layers}
 
     def clear(self) -> None:

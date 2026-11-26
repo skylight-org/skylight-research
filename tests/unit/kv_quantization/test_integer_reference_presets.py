@@ -2,8 +2,7 @@
 
 ``kivi_int_quantizer()``, ``kitty_int_quantizer()`` and ``quarot_int_quantizer()``
 (defined in the recipe files) must reproduce KIVI (new_pack.py), Kitty
-(kitty_sim) and QuaRot (ActQuantizer) exactly, and
-match the dedicated KIVIQuantizer / KittyQuantizer / QuaRotQuantizer.
+(kitty_sim) and QuaRot (ActQuantizer) exactly.
 """
 
 from dataclasses import replace
@@ -21,17 +20,10 @@ from sparse_attention_hub.kv_quantization import (
     IntQuantizerConfig,
     Kitty,
     KittyConfig,
-    KittyQuantizer,
-    KittyQuantizerConfig,
     KIVIConfig,
-    KIVIQuantizer,
-    KIVIQuantizerConfig,
     KVQuantization,
-    PrecisionPlan,
     QuantGranularity,
     QuaRotKVConfig,
-    QuaRotQuantizer,
-    QuaRotQuantizerConfig,
 )
 from sparse_attention_hub.kv_quantization.implementations.kitty import (
     kitty_channel_boost,
@@ -96,11 +88,6 @@ def test_kivi_preset_matches_official_functions(dtype, bits, group_size, kind):
     assert torch.equal(
         codec.dequantize(actual), decode(expected, kind, bits, group_size, dtype=dtype)
     )
-    old = KIVIQuantizer(
-        KIVIQuantizerConfig(bits=bits, granularity=granularity, group_size=group_size)
-    )
-    assert torch.equal(codec.fake_quantize(x), old.fake_quantize(x))
-    assert actual.storage_bytes() == old.quantize(x).storage_bytes()
     assert torch.equal(x, original)
 
 
@@ -150,54 +137,6 @@ def test_kivi_preset_constant_groups_decode_exactly(dtype, constant):
     assert torch.equal(codec.dequantize(record), x)
 
 
-def test_kivi_preset_keep_tokens_matches_kivi_quantizer():
-    x = sample((1, 2, 64, 32), torch.float16, seed=818)
-    x[..., 5, :] = 1000
-    keep = torch.zeros(1, 2, 64, dtype=torch.bool)
-    keep[..., 5] = True
-    plan = PrecisionPlan(bits=2, keep_tokens=keep)
-    new = IntQuantizer(kivi_int_quantizer(granularity=PER_CHANNEL))
-    old = KIVIQuantizer(KIVIQuantizerConfig(granularity=PER_CHANNEL))
-    assert torch.equal(
-        new.dequantize(new.quantize(x, plan)), old.dequantize(old.quantize(x, plan))
-    )
-
-
-def assert_same_history(first, second, keys, values, prompt):
-    """Run two recipes over the same prefill + decode steps; K/V must be identical."""
-    metas: list = [{}, {}]
-    for end in range(prompt, keys.shape[-2] + 1):
-        new, phase = (prompt, "prefill") if end == prompt else (1, "decode")
-        outputs = [
-            coordinator.process(
-                0, keys[..., :end, :], values[..., :end, :], meta,
-                num_new_tokens=new, phase=phase,
-            )
-            for coordinator, meta in zip((first, second), metas)
-        ]
-        assert torch.equal(outputs[0][0], outputs[1][0]), f"keys differ at {end}"
-        assert torch.equal(outputs[0][1], outputs[1][1]), f"values differ at {end}"
-
-
-@pytest.mark.parametrize("dtype", DTYPES)
-@pytest.mark.parametrize("bits", [2, 4])
-@pytest.mark.parametrize("packed", [False, True])
-def test_kivi_default_recipe_equals_the_dedicated_codec(dtype, bits, packed):
-    keys, values = sample((1, 2, 300, 64), dtype, 31), sample((1, 2, 300, 64), dtype, 32)
-    default = KIVIConfig.with_settings(bits=bits, store_codes=packed)
-    assert type(default.key_quantizer) is IntQuantizerConfig
-    dedicated = replace(
-        default,
-        key_quantizer=KIVIQuantizerConfig(bits=bits, granularity=PER_CHANNEL),
-        value_quantizer=KIVIQuantizerConfig(bits=bits),
-    )
-    assert_same_history(
-        KVQuantization.create_from_config(default),
-        KVQuantization.create_from_config(dedicated),
-        keys, values, prompt=150,
-    )
-
-
 # ---------------------------------------------------------------- Kitty
 
 PAGE = 128
@@ -225,8 +164,6 @@ def test_kitty_preset_key_page_matches_reference(dtype, ratio, selection, name):
     codec = IntQuantizer(kitty_int_quantizer(granularity=PER_CHANNEL))
     record = codec.quantize(x, plan)
     assert torch.equal(codec.dequantize(record), expected)
-    old = KittyQuantizer(KittyQuantizerConfig(granularity=PER_CHANNEL))
-    assert record.storage_bytes() == old.quantize(x, plan).storage_bytes()
 
 
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
@@ -302,27 +239,6 @@ def test_kitty_preset_in_the_recipe_matches_reference_kv_cache(
     assert CACHE_KEY in meta
 
 
-@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
-@pytest.mark.parametrize("ratio", [0.0, 0.125, 0.25])
-@pytest.mark.parametrize("packed", [False, True])
-def test_kitty_default_recipe_equals_the_dedicated_codec(dtype, ratio, packed):
-    keys, values = sample((1, 2, 450, 128), dtype, 41), sample((1, 2, 450, 128), dtype, 42)
-    default = KittyConfig.with_settings(boost_fraction=ratio, store_codes=packed)
-    assert type(default.key_quantizer) is IntQuantizerConfig
-    dedicated = replace(
-        default,
-        key_quantizer=KittyQuantizerConfig(
-            bits=2, granularity=PER_CHANNEL, group_size=128
-        ),
-        value_quantizer=KittyQuantizerConfig(bits=2, group_size=128),
-    )
-    assert_same_history(
-        KVQuantization.create_from_config(default),
-        KVQuantization.create_from_config(dedicated),
-        keys, values, prompt=200,
-    )
-
-
 # ---------------------------------------------------------------- QuaRot
 
 
@@ -360,16 +276,6 @@ def test_quarot_preset_matches_official(dtype, bits, symmetric, mode, group, cli
         assert actual.zero_points.dtype == expected.compact_zero_points.dtype
         assert torch.equal(actual.zero_points, expected.compact_zero_points)
     assert torch.equal(codec.dequantize(actual), expected.reconstructed)
-    old = QuaRotQuantizer(
-        QuaRotQuantizerConfig(
-            bits=bits,
-            group_size=group,
-            parameter_mode=mode,
-            symmetric=symmetric,
-            clip_ratio=clip,
-        )
-    )
-    assert actual.storage_bytes() == old.quantize(x).storage_bytes()
     assert torch.equal(x, original)
 
 
@@ -394,27 +300,6 @@ def test_quarot_preset_parameter_dtypes_follow_the_upstream_paths():
     value = IntQuantizer(quarot_int_quantizer("value_group")).quantize(x)
     assert key.scales.dtype == key.zero_points.dtype == torch.float32
     assert value.scales.dtype == value.zero_points.dtype == torch.float16
-
-
-@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
-@pytest.mark.parametrize("store_codes", [False, True])
-def test_quarot_default_recipe_equals_the_dedicated_codec(dtype, store_codes):
-    generator = torch.Generator().manual_seed(9)
-    keys = torch.randn(1, 2, 40, 128, generator=generator).to(dtype)
-    values = torch.randn(1, 2, 40, 128, generator=generator).to(dtype)
-    default = KVQuantization.create_from_config(QuaRotKVConfig(store_codes=store_codes))
-    assert type(default.key_quantizer) is IntQuantizer
-    assert default.config.key_quantizer == quarot_int_quantizer("key_head")
-    assert default.config.value_quantizer == quarot_int_quantizer("value_group")
-    dedicated = KVQuantization.create_from_config(
-        QuaRotKVConfig(
-            key_quantizer=QuaRotQuantizerConfig(parameter_mode="key_head"),
-            value_quantizer=QuaRotQuantizerConfig(parameter_mode="value_group"),
-            store_codes=store_codes,
-        )
-    )
-    assert type(dedicated.key_quantizer) is QuaRotQuantizer
-    assert_same_history(default, dedicated, keys, values, prompt=24)
 
 
 def test_quarot_recipe_rejects_int_settings_that_are_not_quarot():
