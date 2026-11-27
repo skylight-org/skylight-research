@@ -1,7 +1,17 @@
-"""LOFT RAG benchmark implementation for long-context retrieval-augmented generation.
+"""LOFT RAG benchmark for long-context retrieval-augmented generation.
 
-This benchmark implements LOFT's RAG evaluation exactly as specified in the LOFT paper,
-ensuring 100% fidelity with LOFT's evaluation methodology and metrics.
+Checked against https://github.com/google-deepmind/loft (sha 219f68e):
+
+* Metrics and answer extraction match upstream's evaluator exactly.
+* Data comes from the `f20180301/loft-rag-*` mirror.  `*_128k` is LOFT's 128k data
+  verbatim.  `*_32k` is NOT LOFT: upstream has no 32k test split, and the mirror's 32k
+  corpus is its own, ~1.5x LOFT's 32k length, with every gold document placed before the
+  distractors.  Report `by_split["test"]`; `overall` also pools the small dev split.
+* The 32k prompts are 42-46k Llama tokens; head-keeping truncation at 32768 drops the
+  few-shot examples.  Set max_context_length from your tokenizer.
+* Generation is greedy with an 8192-token budget, as gemini-1.5-pro in upstream.
+* The model's chat template wraps the prompt.  For reasoning models, disable thinking
+  and stop on the end-of-turn token, or the parser grades the reasoning block.
 """
 
 from typing import Any, Dict, List
@@ -58,6 +68,10 @@ class LoftRag(Benchmark):
 
     benchmark_name: str = "loft_rag"
     huggingface_dataset_id: str = "f20180301/rag"
+    # LOFT's prompt ends at the query; priming "Final Answer:" suppresses its CoT.
+    prompt_includes_answer_prefix: bool = False
+    # Upstream sets no output cap, so gemini-1.5-pro's 8192-token limit applies.
+    max_new_tokens: int = 8192
 
     def _load_datasets(self) -> pd.DataFrame:
         """Load LOFT RAG datasets from HuggingFace Hub.
@@ -118,6 +132,9 @@ class LoftRag(Benchmark):
         if missing_columns:
             raise ValueError(f"Missing required columns: {missing_columns}")
 
+        # Replace the mirror's 256, which truncated chain-of-thought answers.
+        combined_df["max_new_tokens"] = self.max_new_tokens
+
         return combined_df
 
     def post_run_evaluate(self, results_df: pd.DataFrame) -> Dict[str, Any]:
@@ -150,10 +167,12 @@ class LoftRag(Benchmark):
             all_em_scores.append(metrics["em"])
             all_subspan_em_scores.append(metrics["subspan_em"])
 
-            if "f1" in metrics:
+            # Multi-value f1 is a parse-failure placeholder; keep it out.
+            if "f1" in metrics and "num_scored_for_coverage" not in metrics:
                 all_f1_scores.append(metrics["f1"])
-            if "coverage" in metrics:
-                all_coverage_scores.append(metrics["coverage"])
+            if "num_scored_for_coverage" in metrics:
+                # No parsed rows means no coverage: 0.0, not dropped from the macro.
+                all_coverage_scores.append(metrics.get("coverage", 0.0))
 
             metric_str: str = (
                 f"EM={metrics['em']:.4f}, Subspan_EM={metrics['subspan_em']:.4f}"
@@ -197,6 +216,38 @@ class LoftRag(Benchmark):
             k: round(v, 4) if isinstance(v, float) else v
             for k, v in overall_metrics["overall"].items()
         }
+
+        # Per-split breakdown; `test` is the split to report.
+        if "split" in results_df.columns:
+            by_split: Dict[str, Dict[str, Any]] = {}
+            for split_name, split_df in results_df.groupby("split"):
+                per_task: Dict[str, Dict[str, float]] = {}
+                for task_name, task_df in split_df.groupby("task"):
+                    split_metrics = calculate_metrics(task_df)
+                    if "error" in split_metrics:
+                        continue
+                    per_task[str(task_name)] = {
+                        k: round(v, 4) if isinstance(v, float) else v
+                        for k, v in split_metrics.items()
+                    }
+                if not per_task:
+                    continue
+                agg: Dict[str, Any] = {"n_samples": int(len(split_df))}
+                for key in ("em", "subspan_em", "f1", "coverage"):
+                    vals = []
+                    for m in per_task.values():
+                        multi_value = "num_scored_for_coverage" in m
+                        if key == "coverage" and multi_value:
+                            vals.append(m.get("coverage", 0.0))  # as in `overall`
+                        elif key in m and not (key == "f1" and multi_value):
+                            vals.append(m[key])
+                    if vals:
+                        agg[key] = round(float(sum(vals) / len(vals)), 4)
+                by_split[str(split_name)] = {"overall": agg, "task_metrics": per_task}
+            if by_split:
+                overall_metrics["by_split"] = by_split
+            if "test" in by_split:
+                overall_metrics["summary"]["loft_comparable_split"] = "test"
 
         return overall_metrics
 

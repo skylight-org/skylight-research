@@ -103,7 +103,7 @@ class SocketMasker(TopKMasker):
         dropout: float,
         sparse_meta_data: Dict,
         previous_mask: Mask,
-        **kwargs: Any,
+        **kwargs: Dict[str, Any],
     ) -> Mask:
         if previous_mask.is_full_mask():
             return previous_mask
