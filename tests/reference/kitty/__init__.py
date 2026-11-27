@@ -58,6 +58,8 @@ def official_functions() -> dict:
     namespace.update(
         dataclass=dataclass, CacheConfig=_CacheConfig, DynamicCache=_DynamicCache
     )
-    cache = _definitions("kitty_simulate.py.txt", {"KittyKVCacheConfig", "KittyKVCache"})
+    cache = _definitions(
+        "kitty_simulate.py.txt", {"KittyKVCacheConfig", "KittyKVCache"}
+    )
     exec(compile(cache, "kitty_simulate.py", "exec"), namespace)
     return namespace

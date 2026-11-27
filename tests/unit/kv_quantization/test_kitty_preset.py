@@ -4,7 +4,6 @@ import pytest
 import torch
 
 from sparse_attention_hub.kv_quantization import (
-    kitty_int_quantizer,
     CACHE_KEY,
     ChannelBoostConfig,
     FixedPrecisionConfig,
@@ -18,6 +17,7 @@ from sparse_attention_hub.kv_quantization import (
     QuantGranularity,
     RegionConfig,
     SinkAndLocalCachePolicyConfig,
+    kitty_int_quantizer,
 )
 
 pytestmark = pytest.mark.unit
@@ -63,8 +63,13 @@ class TestConfig:
 
     def test_settings_reach_every_part(self):
         config = KittyConfig.with_settings(
-            boost_fraction=0.25, bits=4, sink_length=16, buffer_length=256,
-            group_size=64, channel_selection="variance", store_codes=True,
+            boost_fraction=0.25,
+            bits=4,
+            sink_length=16,
+            buffer_length=256,
+            group_size=64,
+            channel_selection="variance",
+            store_codes=True,
         )
         assert config.key_quantizer.bits == config.value_quantizer.bits == 4
         assert config.key_quantizer.group_size == 64
@@ -79,7 +84,10 @@ class TestConfig:
     @pytest.mark.parametrize(
         "kwargs, message",
         [
-            ({"cache_policy": SinkAndLocalCachePolicyConfig()}, "KittyCachePolicyConfig"),
+            (
+                {"cache_policy": SinkAndLocalCachePolicyConfig()},
+                "KittyCachePolicyConfig",
+            ),
             ({"key_quantizer": kitty_int_quantizer(bits=2)}, "per channel"),
             (
                 {"value_quantizer": kitty_int_quantizer(granularity=PER_CHANNEL)},
@@ -90,11 +98,7 @@ class TestConfig:
                 "key channels only",
             ),
             (
-                {
-                    "cache_policy": KittyCachePolicyConfig(
-                        key_local=RegionConfig(96)
-                    )
-                },
+                {"cache_policy": KittyCachePolicyConfig(key_local=RegionConfig(96))},
                 "multiple of the key group size",
             ),
         ],
@@ -165,7 +169,9 @@ class TestStorage:
             meta: dict = {}
             kvq.process(0, k[..., :200, :], v[..., :200, :], meta, num_new_tokens=200)
             for t in range(201, k.shape[-2] + 1):
-                out = kvq.process(0, k[..., :t, :], v[..., :t, :], meta, num_new_tokens=1)
+                out = kvq.process(
+                    0, k[..., :t, :], v[..., :t, :], meta, num_new_tokens=1
+                )
             outs.append(out)
         assert torch.equal(outs[0][0], outs[1][0])
         assert torch.equal(outs[0][1], outs[1][1])

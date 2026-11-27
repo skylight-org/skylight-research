@@ -117,7 +117,10 @@ class ChannelBoost(PrecisionPolicy):
         seed = (self.config.seed * 1_000_003 + layer_idx) * 1_000_003 + start
         generator = torch.Generator().manual_seed(seed % (2**63))
         top = torch.stack(
-            [torch.randperm(channels, generator=generator)[:count] for _ in range(heads)]
+            [
+                torch.randperm(channels, generator=generator)[:count]
+                for _ in range(heads)
+            ]
         )
         return top.to(x.device)[None].expand(batch, heads, count)
 

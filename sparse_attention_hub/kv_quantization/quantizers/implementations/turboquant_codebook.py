@@ -142,7 +142,9 @@ class TurboQuantCodebookQuantizer(KVQuantizer):
             or not 0 <= context.layer_idx < 2**31
             or context.tensor_kind not in ("key", "value")
         ):
-            raise ValueError("TurboQuant prod requires a valid layer/key-or-value context")
+            raise ValueError(
+                "TurboQuant prod requires a valid layer/key-or-value context"
+            )
         return context
 
     def state_for(
@@ -225,12 +227,16 @@ class TurboQuantCodebookQuantizer(KVQuantizer):
             metadata=metadata,
             norms=rho.detach().clone().contiguous(),
             qjl_codes=qjl_codes,
-            residual_norms=None if gamma is None else gamma.detach().clone().contiguous(),
+            residual_norms=None
+            if gamma is None
+            else gamma.detach().clone().contiguous(),
         )
 
     def dequantize(self, q: QuantizedTensor) -> torch.Tensor:
         if q.format_id != f"turboquant_codebook_{self.config.variant}_v1":
-            raise ValueError("TurboQuant record variant/format does not match this codec")
+            raise ValueError(
+                "TurboQuant record variant/format does not match this codec"
+            )
         meta = q.metadata
         dimension = q.shape[-1]
         levels = self._levels(dimension, q.device)

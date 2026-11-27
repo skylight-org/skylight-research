@@ -258,7 +258,9 @@ def test_invalid_input_context_and_plans_are_rejected():
         torch.full((1, 1, 16), 3, dtype=torch.int64),
     ):
         with pytest.raises(ValueError):
-            codec.quantize(x, PrecisionPlan(3, channel_bits=channel_bits), context=CONTEXT)
+            codec.quantize(
+                x, PrecisionPlan(3, channel_bits=channel_bits), context=CONTEXT
+            )
 
 
 @pytest.mark.parametrize(

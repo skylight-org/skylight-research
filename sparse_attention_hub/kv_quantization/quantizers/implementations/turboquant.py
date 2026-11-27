@@ -240,14 +240,18 @@ class TurboQuantQuantizer(KVQuantizer):
             or len(set(config.center)) != len(config.center)
             or any(kind not in _CENTER_KINDS for kind in config.center)
         ):
-            raise ValueError(f"center must be a tuple of distinct kinds from {_CENTER_KINDS}")
+            raise ValueError(
+                f"center must be a tuple of distinct kinds from {_CENTER_KINDS}"
+            )
         self._rotation = RandomRotation(config.rotation)
         self._books: Dict[Tuple[int, int], torch.Tensor] = {}
         self._cpu: Dict[Tuple[Any, ...], _Resources] = {}
         self._devices: Dict[Tuple[Any, ...], _Resources] = {}
         # (layer, kind) -> (channel_bits object, its outlier channel indices), so a
         # frozen ChannelBoost choice yields one shared index tensor.
-        self._split_indices: Dict[Tuple[int, str], Tuple[torch.Tensor, torch.Tensor]] = {}
+        self._split_indices: Dict[
+            Tuple[int, str], Tuple[torch.Tensor, torch.Tensor]
+        ] = {}
         # (layer, kind) -> (start of the last chunk seen, frozen FP32 mean [B,H,1,D]).
         self._centers: Dict[Tuple[int, str], Tuple[int, torch.Tensor]] = {}
 
@@ -721,7 +725,9 @@ class TurboQuantQuantizer(KVQuantizer):
             raise ValueError("Outlier channel indices must be ascending and in range")
         meta = q.metadata
         groups = meta.get("groups")
-        high = groups.get("outlier", {}).get("bits") if isinstance(groups, dict) else None
+        high = (
+            groups.get("outlier", {}).get("bits") if isinstance(groups, dict) else None
+        )
         if type(high) is not int or not self.config.bits < high <= 4:
             raise ValueError("TurboQuant outlier record lacks a valid outlier width")
         context = self._validate_context(
@@ -771,7 +777,9 @@ class TurboQuantQuantizer(KVQuantizer):
                     (batch, heads, tokens, size),
                     q.norms[..., i : i + 1],
                     qjl_parts[i],
-                    None if q.residual_norms is None else q.residual_norms[..., i : i + 1],
+                    None
+                    if q.residual_norms is None
+                    else q.residual_norms[..., i : i + 1],
                     state,
                     self._group_coarse_bits(bits),
                 )

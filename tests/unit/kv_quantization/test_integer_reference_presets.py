@@ -11,9 +11,6 @@ import pytest
 import torch
 
 from sparse_attention_hub.kv_quantization import (
-    kivi_int_quantizer,
-    kitty_int_quantizer,
-    quarot_int_quantizer,
     CACHE_KEY,
     ChannelBoost,
     IntQuantizer,
@@ -24,6 +21,9 @@ from sparse_attention_hub.kv_quantization import (
     KVQuantization,
     QuantGranularity,
     QuaRotKVConfig,
+    kitty_int_quantizer,
+    kivi_int_quantizer,
+    quarot_int_quantizer,
 )
 from sparse_attention_hub.kv_quantization.implementations.kitty import (
     kitty_channel_boost,
@@ -226,12 +226,18 @@ def test_kitty_preset_in_the_recipe_matches_reference_kv_cache(
     meta: dict = {}
     actual = [
         kvq.process(
-            0, k[..., :prompt, :], v[..., :prompt, :], meta,
-            num_new_tokens=prompt, phase="prefill",
+            0,
+            k[..., :prompt, :],
+            v[..., :prompt, :],
+            meta,
+            num_new_tokens=prompt,
+            phase="prefill",
         )
     ]
     for t in range(prompt + 1, k.shape[-2] + 1):
-        actual.append(kvq.process(0, k[..., :t, :], v[..., :t, :], meta, num_new_tokens=1))
+        actual.append(
+            kvq.process(0, k[..., :t, :], v[..., :t, :], meta, num_new_tokens=1)
+        )
     assert len(actual) == len(expected)
     for step, ((ek, ev), (ak, av)) in enumerate(zip(expected, actual)):
         assert torch.equal(ak, ek), f"keys differ at step {step}"
@@ -331,13 +337,19 @@ def test_generic_default_is_unchanged():
         ({"parameter_storage": "compute", "compute_dtype": "fp64"}, "compute_dtype"),
         ({"parameter_storage": "compute", "clip_ratio": 0.0}, "clip_ratio"),
         (
-            {"parameter_storage": "compute", "zero_point": "integer",
-             "degenerate_range": "zero_scale"},
+            {
+                "parameter_storage": "compute",
+                "zero_point": "integer",
+                "degenerate_range": "zero_scale",
+            },
             "nonzero scale",
         ),
         (
-            {"parameter_storage": "compute", "symmetric": True,
-             "degenerate_range": "eps"},
+            {
+                "parameter_storage": "compute",
+                "symmetric": True,
+                "degenerate_range": "eps",
+            },
             "Symmetric",
         ),
         ({"parameter_storage": "compute", "symmetric_range": "full"}, "symmetric"),

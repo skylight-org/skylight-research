@@ -19,10 +19,10 @@ from sparse_attention_hub.kv_quantization import (
     KIVIConfig,
     KVQuantizationConfig,
     QuaRotKVConfig,
-    quarot_int_quantizer,
     RegionConfig,
     TurboQuantKVConfig,
     TurboQuantQuantizerConfig,
+    quarot_int_quantizer,
 )
 from sparse_attention_hub.kv_quantization.metrics.quant_error import METRIC_IDS
 from sparse_attention_hub.metric_logging import MicroMetricLogger

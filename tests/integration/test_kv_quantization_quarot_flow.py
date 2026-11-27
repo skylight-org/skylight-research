@@ -34,7 +34,9 @@ pytestmark = pytest.mark.integration
 def config_for_dimension(dimension, *, packed=True, quantize_prefill=True, bits=4):
     return QuaRotKVConfig(
         key_quantizer=quarot_int_quantizer("key_head", group_size=dimension, bits=bits),
-        value_quantizer=quarot_int_quantizer("value_group", group_size=dimension, bits=bits),
+        value_quantizer=quarot_int_quantizer(
+            "value_group", group_size=dimension, bits=bits
+        ),
         store_codes=packed,
         quantize_prefill=quantize_prefill,
     )

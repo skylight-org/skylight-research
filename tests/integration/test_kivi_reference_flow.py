@@ -118,7 +118,7 @@ def test_hf_kivi_codes_state_and_attention_follow_reference_and_storage_modes_ag
             attention_mask,
             scaling,
             dropout=0.0,
-            **kwargs
+            **kwargs,
         ):
             actual = callback(
                 module,
@@ -128,7 +128,7 @@ def test_hf_kivi_codes_state_and_attention_follow_reference_and_storage_modes_ag
                 attention_mask,
                 scaling,
                 dropout,
-                **kwargs
+                **kwargs,
             )
             if "kv_quantization_capture_only" not in kwargs["sparse_meta_data"]:
                 expected_k, expected_v = prepared[module.layer_idx]

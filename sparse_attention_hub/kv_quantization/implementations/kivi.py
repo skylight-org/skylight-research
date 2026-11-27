@@ -124,7 +124,9 @@ def validate_kivi(config: KVQuantizationConfig) -> None:
     if not isinstance(keys, IntQuantizerConfig) or not isinstance(
         values, IntQuantizerConfig
     ):
-        raise ValueError("KIVI uses integer quantizers (IntQuantizerConfig) for K and V")
+        raise ValueError(
+            "KIVI uses integer quantizers (IntQuantizerConfig) for K and V"
+        )
     if QuantGranularity(keys.granularity) != QuantGranularity.PER_CHANNEL:
         raise ValueError("KIVI quantizes keys per channel (PER_CHANNEL)")
     if QuantGranularity(values.granularity) == QuantGranularity.PER_CHANNEL:

@@ -182,7 +182,9 @@ def validate_int_config(config: IntQuantizerConfig) -> None:
         if config.bits < 2:
             raise ValueError("Symmetric integer codes need at least 2 bits")
         if config.zero_point != "float":
-            raise ValueError("Symmetric codes have no zero point; keep zero_point='float'")
+            raise ValueError(
+                "Symmetric codes have no zero point; keep zero_point='float'"
+            )
         if config.degenerate_range not in ("unit_scale", "pm_one"):
             raise ValueError(
                 "Symmetric codes handle an all-zero group with scale 1 "
@@ -569,7 +571,9 @@ class IntQuantizer(KVQuantizer):
             span = hi - lo
             if config.degenerate_range == "eps":
                 span = span.clamp(min=self._range_eps(x.dtype))
-            scale = self._per_width(widths, group_bits, span, lambda w: span / (2**w - 1))
+            scale = self._per_width(
+                widths, group_bits, span, lambda w: span / (2**w - 1)
+            )
             require_finite(scale, name="Integer scales")
             if config.degenerate_range == "zero_scale":
                 # KIVI's reference divides 0 by 0 here (undefined); scale 0 with
@@ -584,7 +588,9 @@ class IntQuantizer(KVQuantizer):
                 if config.degenerate_range == "unit_scale":
                     scale = torch.where(scale == 0, torch.ones_like(scale), scale)
                 if (scale == 0).any():
-                    raise ValueError("A group's scale is zero; use another degenerate_range")
+                    raise ValueError(
+                        "A group's scale is zero; use another degenerate_range"
+                    )
                 denominator = scale
             if valid is not None:
                 # Kept/padded slots must not leave the group's range.

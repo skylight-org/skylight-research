@@ -61,7 +61,9 @@ def test_mse_split_matches_bundled_indices_and_reconstruction(bits, dimension):
     # Only FP32 rounding of normalize-then-rotate vs rotate-then-normalize can
     # move a coordinate across a codebook boundary.
     assert same.float().mean() > 0.999
-    assert torch.equal(rb.norms, rb.norms) and torch.allclose(rs.norms, rb.norms, rtol=1e-6)
+    assert torch.equal(rb.norms, rb.norms) and torch.allclose(
+        rs.norms, rb.norms, rtol=1e-6
+    )
     restored = split.dequantize(rs) @ R.T
     rows = same.reshape(x.shape).all(dim=-1)
     torch.testing.assert_close(
@@ -133,8 +135,12 @@ def test_split_recipe_runs_and_is_as_accurate_as_bundled(variant, dtype):
         new, phase = (40, "prefill") if end == 40 else (1, "decode")
         for i, (coordinator, meta) in enumerate(zip((bundled, split), metas)):
             k, v = coordinator.process(
-                0, keys[..., :end, :], values[..., :end, :], meta,
-                num_new_tokens=new, phase=phase,
+                0,
+                keys[..., :end, :],
+                values[..., :end, :],
+                meta,
+                num_new_tokens=new,
+                phase=phase,
             )
             assert k.dtype == dtype and k.shape == keys[..., :end, :].shape
             errors[i].append(float((k.float() - keys[..., :end, :].float()).norm()))
@@ -151,15 +157,21 @@ def test_split_recipe_runs_and_is_as_accurate_as_bundled(variant, dtype):
 
 def test_split_recipe_requires_a_random_rotation():
     with pytest.raises(ValueError, match="RandomRotationConfig"):
-        TurboQuantSplitKV(TurboQuantSplitKVConfig(key_transform=IdentityTransformConfig()))
+        TurboQuantSplitKV(
+            TurboQuantSplitKVConfig(key_transform=IdentityTransformConfig())
+        )
     with pytest.raises(ValueError, match="TurboQuantCodebookQuantizerConfig"):
-        TurboQuantSplitKV(TurboQuantSplitKVConfig(value_quantizer=TurboQuantQuantizerConfig()))
+        TurboQuantSplitKV(
+            TurboQuantSplitKVConfig(value_quantizer=TurboQuantQuantizerConfig())
+        )
 
 
 def test_split_codec_rejects_other_records_and_bad_settings():
     x = torch.randn(1, 1, 4, 16, generator=torch.Generator().manual_seed(3))
     mse = TurboQuantCodebookQuantizer(TurboQuantCodebookQuantizerConfig())
-    prod = TurboQuantCodebookQuantizer(TurboQuantCodebookQuantizerConfig(variant="prod"))
+    prod = TurboQuantCodebookQuantizer(
+        TurboQuantCodebookQuantizerConfig(variant="prod")
+    )
     with pytest.raises(ValueError, match="variant/format"):
         prod.dequantize(mse.quantize(x))
     with pytest.raises(ValueError, match="context"):

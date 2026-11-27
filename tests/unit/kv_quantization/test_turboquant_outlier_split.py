@@ -74,7 +74,9 @@ def test_split_equals_two_independent_turboquant_codecs(variant, low, high, coun
     codec = TurboQuantQuantizer(TurboQuantQuantizerConfig(bits=low, variant=variant))
     x = torch.randn(2, 2, 8, 128, generator=torch.Generator().manual_seed(11))
     channel_bits = random_channel_bits(2, 2, 128, count, low, high)
-    record = codec.quantize(x, PrecisionPlan(low, channel_bits=channel_bits), context=CONTEXT)
+    record = codec.quantize(
+        x, PrecisionPlan(low, channel_bits=channel_bits), context=CONTEXT
+    )
     assert record.format_id == f"turboquant_{variant}_outlier_v1"
     assert record.norms.shape == (2, 2, 8, 2) and record.norms.dtype == torch.float32
     assert record.outlier_indices.dtype == torch.int16
@@ -94,10 +96,14 @@ def test_code_streams_average_the_named_bit_width(average, low, high, count):
     codec = TurboQuantQuantizer(TurboQuantQuantizerConfig(bits=low))
     x = torch.randn(1, 2, 8, 128, generator=torch.Generator().manual_seed(3))
     channel_bits = random_channel_bits(1, 2, 128, count, low, high)
-    record = codec.quantize(x, PrecisionPlan(low, channel_bits=channel_bits), context=CONTEXT)
+    record = codec.quantize(
+        x, PrecisionPlan(low, channel_bits=channel_bits), context=CONTEXT
+    )
     assert record.codes.numel() * 8 == x.numel() * average
     vectors = x.shape[0] * x.shape[1] * x.shape[2]
-    outlier = unpack(record.codes[: record.metadata["outlier_code_bytes"]], high, vectors * count)
+    outlier = unpack(
+        record.codes[: record.metadata["outlier_code_bytes"]], high, vectors * count
+    )
     assert outlier.max() < 2**high
 
 
@@ -109,7 +115,9 @@ def test_equal_sized_groups_use_different_rotations():
     assert not torch.equal(outlier.rotation, normal.rotation)
     assert not torch.equal(outlier.rotation, whole.rotation)
     eye = torch.eye(64)
-    torch.testing.assert_close(outlier.rotation @ outlier.rotation.T, eye, atol=1e-5, rtol=0)
+    torch.testing.assert_close(
+        outlier.rotation @ outlier.rotation.T, eye, atol=1e-5, rtol=0
+    )
 
 
 def test_without_channel_bits_the_whole_vector_codec_is_unchanged():
@@ -159,7 +167,9 @@ def test_tampered_split_records_are_rejected(field):
     codec = TurboQuantQuantizer(TurboQuantQuantizerConfig(bits=2))
     channel_bits = random_channel_bits(1, 2, 128, 32, 2, 3)
     record = codec.quantize(
-        torch.randn(1, 2, 4, 128), PrecisionPlan(2, channel_bits=channel_bits), context=CONTEXT
+        torch.randn(1, 2, 4, 128),
+        PrecisionPlan(2, channel_bits=channel_bits),
+        context=CONTEXT,
     )
     if field == "groups":
         record.metadata["groups"]["outlier"]["rotation_id"] = "x"
@@ -174,15 +184,21 @@ def test_tampered_split_records_are_rejected(field):
 class TestFrozenChannelBoost:
     def policy(self):
         return ChannelBoost(
-            ChannelBoostConfig(fraction=0.25, boosted_bits=3, kinds=("key",), freeze="prefill")
+            ChannelBoostConfig(
+                fraction=0.25, boosted_bits=3, kinds=("key",), freeze="prefill"
+            )
         )
 
     def test_decode_chunks_reuse_the_prefill_choice(self):
         policy = self.policy()
         prefill = torch.randn(1, 2, 16, 32, generator=torch.Generator().manual_seed(0))
-        first = policy.bits_for(0, prefill, torch.arange(16), tensor_kind="key", default_bits=2)
+        first = policy.bits_for(
+            0, prefill, torch.arange(16), tensor_kind="key", default_bits=2
+        )
         token = torch.randn(1, 2, 1, 32) * 100
-        later = policy.bits_for(0, token, torch.arange(16, 17), tensor_kind="key", default_bits=2)
+        later = policy.bits_for(
+            0, token, torch.arange(16, 17), tensor_kind="key", default_bits=2
+        )
         assert later.channel_bits is first.channel_bits
         expected = prefill.abs().mean(dim=-2).topk(8, dim=-1).indices
         chosen = (first.channel_bits == 3).nonzero()[:, -1].reshape(1, 2, 8)
@@ -190,35 +206,74 @@ class TestFrozenChannelBoost:
 
     def test_a_new_request_chooses_again(self):
         policy = self.policy()
-        first = policy.bits_for(0, torch.randn(1, 2, 8, 32), torch.arange(8), tensor_kind="key", default_bits=2)
-        again = policy.bits_for(0, torch.randn(1, 2, 8, 32), torch.arange(8), tensor_kind="key", default_bits=2)
+        first = policy.bits_for(
+            0,
+            torch.randn(1, 2, 8, 32),
+            torch.arange(8),
+            tensor_kind="key",
+            default_bits=2,
+        )
+        again = policy.bits_for(
+            0,
+            torch.randn(1, 2, 8, 32),
+            torch.arange(8),
+            tensor_kind="key",
+            default_bits=2,
+        )
         assert again.channel_bits is not first.channel_bits
 
     def test_layers_and_kinds_are_independent(self):
-        policy = ChannelBoost(ChannelBoostConfig(fraction=0.25, boosted_bits=3, kinds=("key", "value"), freeze="prefill"))
+        policy = ChannelBoost(
+            ChannelBoostConfig(
+                fraction=0.25, boosted_bits=3, kinds=("key", "value"), freeze="prefill"
+            )
+        )
         x = torch.randn(1, 2, 8, 32)
         a = policy.bits_for(0, x, torch.arange(8), tensor_kind="key", default_bits=2)
         b = policy.bits_for(1, x, torch.arange(8), tensor_kind="key", default_bits=2)
         c = policy.bits_for(0, x, torch.arange(8), tensor_kind="value", default_bits=2)
-        assert a.channel_bits is not b.channel_bits and a.channel_bits is not c.channel_bits
+        assert (
+            a.channel_bits is not b.channel_bits
+            and a.channel_bits is not c.channel_bits
+        )
 
     def test_default_still_rescores_every_chunk(self):
         policy = ChannelBoost(ChannelBoostConfig(fraction=0.25, boosted_bits=4))
-        a = policy.bits_for(0, torch.randn(1, 2, 8, 32), torch.arange(8), tensor_kind="key", default_bits=2)
-        b = policy.bits_for(0, torch.randn(1, 2, 1, 32), torch.arange(8, 9), tensor_kind="key", default_bits=2)
+        a = policy.bits_for(
+            0,
+            torch.randn(1, 2, 8, 32),
+            torch.arange(8),
+            tensor_kind="key",
+            default_bits=2,
+        )
+        b = policy.bits_for(
+            0,
+            torch.randn(1, 2, 1, 32),
+            torch.arange(8, 9),
+            tensor_kind="key",
+            default_bits=2,
+        )
         assert a.channel_bits is not b.channel_bits
 
 
 class TestOutlierSplitProfile:
     def test_presets(self):
-        for average, (low, high, fraction) in {2.5: (2, 3, 0.5), 3.5: (3, 4, 0.5)}.items():
+        for average, (low, high, fraction) in {
+            2.5: (2, 3, 0.5),
+            3.5: (3, 4, 0.5),
+        }.items():
             config = TurboQuantKVConfig.outlier_split(average)
-            assert config.key_quantizer.bits == low and config.value_quantizer.bits == low
+            assert (
+                config.key_quantizer.bits == low and config.value_quantizer.bits == low
+            )
             policy = config.precision_policy
             assert (policy.boosted_bits, policy.fraction) == (high, fraction)
             assert policy.kinds == ("key", "value") and policy.freeze == "prefill"
             assert type(KVQuantization.create_from_config(config)) is TurboQuantKV
-        assert TurboQuantKVConfig.outlier_split(2.5, "prod").key_quantizer.variant == "prod"
+        assert (
+            TurboQuantKVConfig.outlier_split(2.5, "prod").key_quantizer.variant
+            == "prod"
+        )
         with pytest.raises(ValueError):
             TurboQuantKVConfig.outlier_split(3.0)
 
@@ -226,7 +281,10 @@ class TestOutlierSplitProfile:
         config = TurboQuantKVConfig.outlier_split(2.5)
         with pytest.raises(ValueError, match="freeze"):
             KVQuantization.create_from_config(
-                replace(config, precision_policy=replace(config.precision_policy, freeze="none"))
+                replace(
+                    config,
+                    precision_policy=replace(config.precision_policy, freeze="none"),
+                )
             )
         with pytest.raises(ValueError):
             KVQuantization.create_from_config(
@@ -237,7 +295,9 @@ class TestOutlierSplitProfile:
         from sparse_attention_hub.kv_quantization import ChannelBoost as Policy
 
         with pytest.raises(ValueError, match="PER_CHANNEL"):
-            Policy(ChannelBoostConfig()).validate_quantizers(IntQuantizerConfig(bits=2), IntQuantizerConfig(bits=2))
+            Policy(ChannelBoostConfig()).validate_quantizers(
+                IntQuantizerConfig(bits=2), IntQuantizerConfig(bits=2)
+            )
 
     @pytest.mark.parametrize("packed", [True, False])
     @pytest.mark.parametrize("variant", ["mse", "prod"])
@@ -261,8 +321,12 @@ class TestOutlierSplitProfile:
             scores = original[..., :4, :].abs().mean(dim=-2)
             channel_bits = torch.full((1, 2, 16), 2, dtype=torch.int64)
             channel_bits.scatter_(-1, scores.topk(8, dim=-1).indices, 3)
-            expected = reference_split(codec, original, channel_bits, 3, AttentionContext(0, kind, 0))
-            np.testing.assert_allclose(actual.double().numpy(), expected, rtol=3e-5, atol=3e-5)
+            expected = reference_split(
+                codec, original, channel_bits, 3, AttentionContext(0, kind, 0)
+            )
+            np.testing.assert_allclose(
+                actual.double().numpy(), expected, rtol=3e-5, atol=3e-5
+            )
         if packed:
             store = metadata[CACHE_KEY]
             chunks = store.layers[0].key.chunks
@@ -273,7 +337,9 @@ class TestOutlierSplitProfile:
                 for kind in ("key", "value")
                 for c in getattr(store.layers[0], kind).chunks
             )
-            repeats = sum(len(getattr(store.layers[0], k).chunks) - 1 for k in ("key", "value"))
+            repeats = sum(
+                len(getattr(store.layers[0], k).chunks) - 1 for k in ("key", "value")
+            )
             assert store.stats()["store_bytes"] == payload - repeats * index_bytes
 
 
@@ -300,7 +366,11 @@ def test_kivi_window_keeps_recent_tokens_exact(packed):
         channel_bits = torch.full((1, 2, 16), 2, dtype=torch.int64)
         channel_bits.scatter_(-1, scores.topk(8, dim=-1).indices, 3)
         expected = reference_split(
-            codec, original[..., :moved, :], channel_bits, 3, AttentionContext(0, kind, 0)
+            codec,
+            original[..., :moved, :],
+            channel_bits,
+            3,
+            AttentionContext(0, kind, 0),
         )
         np.testing.assert_allclose(
             actual[..., :moved, :].double().numpy(), expected, rtol=3e-5, atol=3e-5
@@ -327,18 +397,24 @@ class TestKeyCentering:
     def test_centered_record_is_the_plain_codec_on_x_minus_mean(self):
         x = self.offset_keys()
         plain = TurboQuantQuantizer(TurboQuantQuantizerConfig(bits=2))
-        centered = TurboQuantQuantizer(TurboQuantQuantizerConfig(bits=2, center=("key",)))
+        centered = TurboQuantQuantizer(
+            TurboQuantQuantizerConfig(bits=2, center=("key",))
+        )
         record = centered.quantize(x, context=CONTEXT)
         mean = x.mean(dim=-2, keepdim=True)
         assert record.metadata["centered"] is True and record.dtype == x.dtype
         torch.testing.assert_close(record.zero_points, mean)
         expected = plain.dequantize(plain.quantize(x - mean, context=CONTEXT)) + mean
-        torch.testing.assert_close(centered.dequantize(record), expected, rtol=1e-5, atol=1e-4)
+        torch.testing.assert_close(
+            centered.dequantize(record), expected, rtol=1e-5, atol=1e-4
+        )
 
     def test_centering_removes_the_shared_offset_error(self):
         x = self.offset_keys()
         plain = TurboQuantQuantizer(TurboQuantQuantizerConfig(bits=2))
-        centered = TurboQuantQuantizer(TurboQuantQuantizerConfig(bits=2, center=("key",)))
+        centered = TurboQuantQuantizer(
+            TurboQuantQuantizerConfig(bits=2, center=("key",))
+        )
         token_part = x - x.mean(dim=-2, keepdim=True)
         error = {
             name: (codec.dequantize(codec.quantize(x, context=CONTEXT)) - x).norm()
@@ -352,24 +428,36 @@ class TestKeyCentering:
         codec = TurboQuantQuantizer(TurboQuantQuantizerConfig(bits=3, center=("key",)))
         x = self.offset_keys()
         first = codec.quantize(x[..., :60, :], context=AttentionContext(1, "key", 0))
-        later = codec.quantize(x[..., 60:, :] + 100, context=AttentionContext(1, "key", 60))
+        later = codec.quantize(
+            x[..., 60:, :] + 100, context=AttentionContext(1, "key", 60)
+        )
         assert later.zero_points is first.zero_points
         again = codec.quantize(x[..., :8, :], context=AttentionContext(1, "key", 0))
         assert again.zero_points is not first.zero_points
-        other_layer = codec.quantize(x[..., 60:, :], context=AttentionContext(2, "key", 60))
-        torch.testing.assert_close(other_layer.zero_points, x[..., 60:, :].mean(-2, keepdim=True))
+        other_layer = codec.quantize(
+            x[..., 60:, :], context=AttentionContext(2, "key", 60)
+        )
+        torch.testing.assert_close(
+            other_layer.zero_points, x[..., 60:, :].mean(-2, keepdim=True)
+        )
 
     def test_split_plans_are_centered_too(self):
         x = self.offset_keys()
         channel_bits = random_channel_bits(1, 2, 128, 64, 2, 3)
         plan = PrecisionPlan(2, channel_bits=channel_bits)
         plain = TurboQuantQuantizer(TurboQuantQuantizerConfig(bits=2))
-        centered = TurboQuantQuantizer(TurboQuantQuantizerConfig(bits=2, center=("key",)))
+        centered = TurboQuantQuantizer(
+            TurboQuantQuantizerConfig(bits=2, center=("key",))
+        )
         record = centered.quantize(x, plan, context=CONTEXT)
         assert record.format_id == "turboquant_mse_outlier_v1"
         mean = x.mean(dim=-2, keepdim=True)
-        expected = plain.dequantize(plain.quantize(x - mean, plan, context=CONTEXT)) + mean
-        torch.testing.assert_close(centered.dequantize(record), expected, rtol=1e-5, atol=1e-4)
+        expected = (
+            plain.dequantize(plain.quantize(x - mean, plan, context=CONTEXT)) + mean
+        )
+        torch.testing.assert_close(
+            centered.dequantize(record), expected, rtol=1e-5, atol=1e-4
+        )
 
     def test_kinds_outside_center_are_unchanged(self):
         codec = TurboQuantQuantizer(TurboQuantQuantizerConfig(bits=2, center=("key",)))
@@ -387,7 +475,9 @@ class TestKeyCentering:
         with pytest.raises(ValueError, match="center"):
             TurboQuantQuantizer(TurboQuantQuantizerConfig(center=center))
 
-    @pytest.mark.parametrize("tamper", ["drop_mean", "drop_flag", "shape", "plain_codec"])
+    @pytest.mark.parametrize(
+        "tamper", ["drop_mean", "drop_flag", "shape", "plain_codec"]
+    )
     def test_tampered_centered_records_are_rejected(self, tamper):
         codec = TurboQuantQuantizer(TurboQuantQuantizerConfig(bits=2, center=("key",)))
         record = codec.quantize(self.offset_keys(), context=CONTEXT)
@@ -410,15 +500,21 @@ class TestKeyCentering:
         assert TurboQuantKVConfig.outlier_split(2.5).key_quantizer.center == ()
 
     def test_store_counts_the_shared_mean_once(self):
-        config = TurboQuantKVConfig.outlier_split(2.5, center_keys=True, store_codes=True)
+        config = TurboQuantKVConfig.outlier_split(
+            2.5, center_keys=True, store_codes=True
+        )
         method = KVQuantization.create_from_config(config)
         keys = self.offset_keys(tokens=9)[..., :16]
         values = torch.randn(1, 2, 9, 16)
         metadata = {}
         for end, count in [(4, 4), (5, 1), (9, 4)]:
             result = method.process(
-                0, keys[..., :end, :], values[..., :end, :], metadata,
-                num_new_tokens=count, phase="prefill" if end == 4 else "decode",
+                0,
+                keys[..., :end, :],
+                values[..., :end, :],
+                metadata,
+                num_new_tokens=count,
+                phase="prefill" if end == 4 else "decode",
             )
         assert result[0].shape == keys.shape
         store = metadata[CACHE_KEY]
@@ -431,7 +527,9 @@ class TestKeyCentering:
             for kind in ("key", "value")
             for c in getattr(store.layers[0], kind).chunks
         )
-        repeats = sum(len(getattr(store.layers[0], k).chunks) - 1 for k in ("key", "value"))
+        repeats = sum(
+            len(getattr(store.layers[0], k).chunks) - 1 for k in ("key", "value")
+        )
         key_repeats = len(chunks) - 1
         assert store.stats()["store_bytes"] == (
             payload - repeats * index_bytes - key_repeats * mean_bytes

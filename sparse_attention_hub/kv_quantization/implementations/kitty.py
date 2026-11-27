@@ -16,8 +16,8 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from ..base import KVQuantization, KVQuantizationConfig
-from ..policies.cache.implementations.sink_and_local import KittyCachePolicyConfig
 from ..policies.cache.base import RegionConfig
+from ..policies.cache.implementations.sink_and_local import KittyCachePolicyConfig
 from ..policies.precision.base import PrecisionPolicyConfig
 from ..policies.precision.implementations.channel_boost import (
     ChannelBoostConfig,
@@ -58,7 +58,9 @@ def kitty_int_quantizer(
     return IntQuantizerConfig(**settings)
 
 
-def kitty_channel_boost(fraction: float, selection: str = "magnitude") -> ChannelBoostConfig:
+def kitty_channel_boost(
+    fraction: float, selection: str = "magnitude"
+) -> ChannelBoostConfig:
     """ChannelBoost exactly as in the reference: keys only, 4 bits, floor count,
     scores computed in the cache dtype."""
     return ChannelBoostConfig(
@@ -91,9 +93,7 @@ class KittyConfig(KVQuantizationConfig):
     precision_policy: PrecisionPolicyConfig = field(
         default_factory=lambda: kitty_channel_boost(0.125)
     )
-    cache_policy: KittyCachePolicyConfig = field(
-        default_factory=KittyCachePolicyConfig
-    )
+    cache_policy: KittyCachePolicyConfig = field(default_factory=KittyCachePolicyConfig)
 
     @classmethod
     def with_settings(
@@ -160,7 +160,9 @@ def validate_kitty(config: KVQuantizationConfig) -> None:
     if not isinstance(keys, IntQuantizerConfig) or not isinstance(
         values, IntQuantizerConfig
     ):
-        raise ValueError("Kitty uses integer quantizers (IntQuantizerConfig) for K and V")
+        raise ValueError(
+            "Kitty uses integer quantizers (IntQuantizerConfig) for K and V"
+        )
     if QuantGranularity(keys.granularity) != QuantGranularity.PER_CHANNEL:
         raise ValueError("Kitty quantizes keys per channel (PER_CHANNEL)")
     if QuantGranularity(values.granularity) == QuantGranularity.PER_CHANNEL:
@@ -181,7 +183,11 @@ def validate_kitty(config: KVQuantizationConfig) -> None:
     buffer = config.cache_policy.key_local.tokens
     if type(buffer) is not int or buffer < 1:
         raise ValueError("Kitty's key buffer must be a positive integer")
-    if type(keys.group_size) is not int or keys.group_size < 1 or buffer % keys.group_size:
+    if (
+        type(keys.group_size) is not int
+        or keys.group_size < 1
+        or buffer % keys.group_size
+    ):
         raise ValueError(
             f"Kitty needs the key buffer ({buffer}) to be a multiple of the key "
             f"group size ({keys.group_size}), so every key group is complete"

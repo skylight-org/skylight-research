@@ -7,7 +7,9 @@ import torch
 
 from ..base import KVQuantization, KVQuantizationConfig
 from ..policies.cache.implementations.immediate import FullQuantizationCachePolicyConfig
-from ..policies.cache.implementations.sink_and_local import SinkAndLocalCachePolicyConfig
+from ..policies.cache.implementations.sink_and_local import (
+    SinkAndLocalCachePolicyConfig,
+)
 from ..policies.precision.implementations.channel_boost import ChannelBoostConfig
 from ..policies.precision.implementations.fixed import FixedPrecisionConfig
 from ..quantizers.implementations.turboquant import TurboQuantQuantizerConfig
@@ -202,9 +204,7 @@ class TurboQuantSplitKVConfig(KVQuantizationConfig):
     """
 
     key_transform: RandomRotationConfig = field(default_factory=RandomRotationConfig)
-    value_transform: RandomRotationConfig = field(
-        default_factory=RandomRotationConfig
-    )
+    value_transform: RandomRotationConfig = field(default_factory=RandomRotationConfig)
     key_quantizer: TurboQuantCodebookQuantizerConfig = field(
         default_factory=TurboQuantCodebookQuantizerConfig
     )
@@ -229,7 +229,9 @@ def validate_turboquant_split_config(config: TurboQuantSplitKVConfig) -> None:
             )
         quantizer = getattr(config, f"{kind}_quantizer")
         if type(quantizer) is not TurboQuantCodebookQuantizerConfig:
-            raise ValueError("TurboQuant split requires TurboQuantCodebookQuantizerConfig")
+            raise ValueError(
+                "TurboQuant split requires TurboQuantCodebookQuantizerConfig"
+            )
     if type(config.cache_policy) is not FullQuantizationCachePolicyConfig:
         raise ValueError("TurboQuant requires FullQuantizationCachePolicyConfig")
     if type(config.precision_policy) is not FixedPrecisionConfig:
