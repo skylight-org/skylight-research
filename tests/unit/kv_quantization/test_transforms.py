@@ -15,7 +15,6 @@ from sparse_attention_hub.kv_quantization import (
     KVQuantizationConfig,
     KVTransform,
     KVTransformRegistry,
-    LearnedRotationConfig,
     RandomHadamardTransform,
     RandomHadamardTransformConfig,
     RandomRotation,
@@ -109,10 +108,6 @@ class TestRegistry:
         transform = KVTransformRegistry.create(config)
         assert type(transform) is cls
         assert cls.__bases__ == (KVTransform,)
-
-    def test_learned_rotation_is_a_stub(self):
-        with pytest.raises(NotImplementedError, match="scaffold"):
-            KVTransformRegistry.create(LearnedRotationConfig())
 
 
 class TestOrthogonalRotations:

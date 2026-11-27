@@ -12,13 +12,9 @@ parent package. The generic baseline is configured through
 | [QuaRot KV](#quarot-kv) | `QuaRotKVConfig` / `QuaRotKV` | [quarot_kv.py](quarot_kv.py) | Implemented portable accuracy-profile KV path |
 | [TurboQuant KV](#turboquant-kv) | `TurboQuantKVConfig` / `TurboQuantKV` | [turboquant_kv.py](turboquant_kv.py) | Implemented portable MSE/prod mathematical profiles |
 | [TurboQuant KV, split](#split-rotation-and-codebook) | `TurboQuantSplitKVConfig` / `TurboQuantSplitKV` | [turboquant_kv.py](turboquant_kv.py) | Implemented; rotation as a transform, codebook as a quantizer |
-| KVQuant NUQ | `KVQuantNUQConfig` / `KVQuantNUQ` | [kvquant_nuq.py](kvquant_nuq.py) | Scaffold |
-| NVFP4 KV | `NVFP4KVConfig` / `NVFP4KV` | [nvfp4_kv.py](nvfp4_kv.py) | Scaffold |
 
-Scaffold recipes inherit `PendingRecipe` and raise `NotImplementedError` when
-selected. Their available building blocks do not establish a complete paper
-implementation. Add each method's reference, behavior, tests and limits here as
-its recipe is implemented.
+Add each method's reference, behavior, tests and limits here as its recipe is
+implemented.
 
 ## KIVI
 

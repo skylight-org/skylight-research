@@ -63,23 +63,18 @@ kv_quantization/
 │   ├── kivi.py
 │   ├── quarot_kv.py
 │   ├── turboquant_kv.py
-│   ├── kvquant_nuq.py
-│   ├── kitty.py
-│   └── nvfp4_kv.py
+│   └── kitty.py
 ├── transforms/
 │   ├── base.py
 │   └── implementations/
 │       ├── identity.py
 │       ├── hadamard.py
 │       ├── random_hadamard.py
-│       ├── random_rotation.py
-│       └── learned_rotation.py   # stub
+│       └── random_rotation.py
 ├── quantizers/
 │   ├── base.py
 │   └── implementations/
 │       ├── integer.py
-│       ├── kivi.py                 # Released KIVI numerical rules
-│       ├── quarot.py               # Released QuaRot accuracy-path numerics
 │       ├── turboquant.py           # Sphere MSE codebooks and QJL-corrected prod
 │       ├── fp8.py
 │       ├── nvfp4.py
@@ -114,13 +109,13 @@ kv_quantization/
 | `base.py` | `KVQuantizationConfig` and `KVQuantization`: select and orchestrate components |
 | `registry.py` | Independent config-type factories; implementations use their registration decorators |
 | `context.py` | `AttentionContext` and opt-in tracing; metadata only, no KV storage |
-| `transforms/` | `KVTransform`; working Identity, Hadamard, RandomHadamard and RandomRotation; LearnedRotation scaffolded |
-| `quantizers/` | `KVQuantizer`, `QuantGranularity`; working INT, KIVI, Kitty, QuaRot, TurboQuant MSE/prod, FP8, FakeNVFP4, MXFP and nonuniform reference codecs; native NVFP4 scaffold |
+| `transforms/` | `KVTransform`; working Identity, Hadamard, RandomHadamard and RandomRotation |
+| `quantizers/` | `KVQuantizer`, `QuantGranularity`; working INT, KIVI, Kitty, QuaRot, TurboQuant MSE/prod, FP8, FakeNVFP4, MXFP and nonuniform reference codecs |
 | `policies/precision/` | `PrecisionPolicy`, `PrecisionPlan`; fixed bits, mixed-channel bits and optional exact-token preservation |
 | `policies/cache/` | `CachePolicy`, `RegionConfig` (sink/local size and quantizer), and six working policies (Default, SinkAndLocal, Kitty, SinkOnly, FullQuantization, LocalOnly) |
 | `cache/` | `QuantizedKVStore`, per-layer state, encoded tensor records and chunks |
 | `metrics/quant_error.py` | Optional reconstruction errors on quantized regions; stored tensor bytes |
-| `implementations/` | Implemented KIVI/Kitty/QuaRotKV/TurboQuantKV recipes; KVQuantNUQ and NVFP4KV declarations |
+| `implementations/` | Implemented KIVI/Kitty/QuaRotKV/TurboQuantKV recipes |
 
 For example, `implementations/kivi.py` assembles the complete method from
 components, selecting `kivi_int_quantizer()` by default and
@@ -377,10 +372,8 @@ not guarantee lower error for every individual vector.
 
 ## Intentionally pending
 
-Learned rotations, the native NVFP4 codec, coordinator-level calibration, and the
-KVQuantNUQ and NVFP4KV paper recipes still raise
-`NotImplementedError` when selected. Their classes, configs and registry entries
-are ready for focused implementations. Generic FP8/FakeNVFP4/MXFP/nonuniform
+Coordinator-level calibration still raises `NotImplementedError` when selected.
+Generic FP8/FakeNVFP4/MXFP/nonuniform
 codecs, ChannelBoost and OutlierTokenPolicy are implemented; their existence does
 not establish paper-reference parity. KIVI's portable reference path is implemented
 and numerically checked. QuaRot KV also has a portable, source-checked
@@ -388,8 +381,7 @@ accuracy-profile implementation; see its implementation note for scope.
 KIVI's shared buffer is `SinkAndLocalCachePolicy`.
 Kitty follows the authors' accuracy simulation (per-token value window, page-wise
 key boost); see `implementations/README.md`.
-KVQuant requires calibrated codebooks and per-element
-outliers; keys are quantized post-RoPE (no RoPE inversion). TurboQuantKV implements
+Keys are quantized post-RoPE (no RoPE inversion). TurboQuantKV implements
 both uniform MSE and QJL-corrected prod profiles; fractional-bit outlier profiles
 are not reproduced.
 

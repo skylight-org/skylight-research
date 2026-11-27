@@ -1,9 +1,8 @@
-"""NVFP4Quantizer (real, hardware) component and the shared NVFP4 configuration."""
+"""The NVFP4 format settings, shared by FakeNVFP4Quantizer."""
 
 from dataclasses import dataclass
 
-from ...registry import KVQuantizerRegistry
-from ..base import KVQuantizerConfig, PendingQuantizer
+from ..base import KVQuantizerConfig
 
 
 @dataclass(frozen=True)
@@ -18,8 +17,3 @@ class NVFP4QuantizerConfig(KVQuantizerConfig):
     bits: int = 4
     group_size: int = 16
     symmetric: bool = True
-
-
-@KVQuantizerRegistry.register(NVFP4QuantizerConfig)
-class NVFP4Quantizer(PendingQuantizer):
-    """TODO: real NVFP4 via NVIDIA kernels (modelopt), bit-identical to FakeNVFP4."""

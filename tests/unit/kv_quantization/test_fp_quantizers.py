@@ -16,7 +16,6 @@ from sparse_attention_hub.kv_quantization import (
     KVQuantizerRegistry,
     MXFPQuantizer,
     MXFPQuantizerConfig,
-    NVFP4QuantizerConfig,
     QuantGranularity,
 )
 from sparse_attention_hub.kv_quantization.quantizers.common import (
@@ -217,10 +216,6 @@ class TestFakeNVFP4:
             FakeNVFP4Quantizer(FakeNVFP4QuantizerConfig(group_size=32))
         with pytest.raises(ValueError, match="symmetric"):
             FakeNVFP4Quantizer(FakeNVFP4QuantizerConfig(symmetric=False))
-
-    def test_real_nvfp4_is_still_a_stub(self):
-        with pytest.raises(NotImplementedError):
-            KVQuantizerRegistry.create(NVFP4QuantizerConfig())
 
 
 class TestMXFP:
