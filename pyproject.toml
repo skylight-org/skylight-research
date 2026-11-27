@@ -108,7 +108,7 @@ include = ["sparse_attention_hub*"]
 exclude = ["tests*"]
 
 [tool.setuptools.package-data]
-"sparse_attention_hub.kv_quantization" = ["LICENSE-KIVI", "LICENSE-QUAROT"]
+"sparse_attention_hub.kv_quantization" = ["LICENSE-KITTY", "LICENSE-KIVI", "LICENSE-QUAROT"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
