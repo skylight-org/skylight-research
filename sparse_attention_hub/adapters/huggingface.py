@@ -3,13 +3,15 @@
 import random
 import string
 from contextlib import contextmanager
-from typing import Any, Callable, Dict, Generator, List, Optional, Tuple
+from importlib import import_module
+from typing import Any, Callable, Dict, Generator, List, Optional, Tuple, cast
 
 import torch
 from tqdm import tqdm
 from transformers.masking_utils import ALL_MASK_ATTENTION_FUNCTIONS
 from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
 
+from ..kv_quantization.attention_mask import align_attention_mask
 from ..sparse_attention.base import SparseAttention, SparseAttentionConfig
 from ..sparse_attention.research_attention.base import ResearchAttention
 from .base import ModelAdapter, Request, RequestResponse
@@ -190,21 +192,54 @@ class ModelAdapterHF(ModelAdapter):
                     question_tokens = question_tokens.to(input_device)
 
                 if self._sparse_attention_available:
-                    context_outputs = self.model(
-                        context_tokens,
-                        past_key_values=None,
-                        use_cache=True,
-                        sparse_meta_data=sparse_meta_data,
-                    )
+                    try:
+                        if (
+                            self.sparse_attention is not None
+                            and self.sparse_attention.kv_quantization is not None
+                        ):
+                            # Capture the entire context while HF still exposes it,
+                            # even if its native cache will retain only a window.
+                            # The callback delegates computation to native attention.
+                            sparse_meta_data["kv_quantization_phase"] = "prefill"
+                            sparse_meta_data["kv_quantization_capture_only"] = {
+                                id(module): module.config._attn_implementation
+                                for module in self.model.modules()
+                                if hasattr(module, "config")
+                                and hasattr(module.config, "_attn_implementation")
+                            }
+                            try:
+                                with self.enable_sparse_mode(native_prefill=True):
+                                    context_outputs = self.model(
+                                        context_tokens,
+                                        past_key_values=None,
+                                        use_cache=True,
+                                        sparse_meta_data=sparse_meta_data,
+                                    )
+                            finally:
+                                sparse_meta_data.pop(
+                                    "kv_quantization_capture_only", None
+                                )
+                            sparse_meta_data["kv_quantization_phase"] = "decode"
+                        else:
+                            context_outputs = self.model(
+                                context_tokens,
+                                past_key_values=None,
+                                use_cache=True,
+                                sparse_meta_data=sparse_meta_data,
+                            )
 
-                    with self.enable_sparse_mode():
-                        response_text = self._generate_response(
-                            question_tokens,
-                            context_outputs,
-                            sparse_meta_data,
-                            generation_kwargs,
-                            **kwargs,
-                        )
+                        with self.enable_sparse_mode():
+                            response_text = self._generate_response(
+                                question_tokens,
+                                context_outputs,
+                                sparse_meta_data,
+                                generation_kwargs,
+                                **kwargs,
+                            )
+                    finally:
+                        # Free the per-question KV quantization store, even on failure.
+                        if self.sparse_attention is not None:
+                            self.sparse_attention.clear_request_state(sparse_meta_data)
                 else:
                     context_outputs = self.model(
                         context_tokens,
@@ -270,7 +305,7 @@ class ModelAdapterHF(ModelAdapter):
             attention_mask: Optional[torch.Tensor],
             scaling: float = 1.0,
             dropout: float = 0.0,
-            **kwargs: Dict[str, Any],
+            **kwargs: Any,
         ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
             """Custom attention callable for HuggingFace integration."""
             if hasattr(module, "layer_idx"):
@@ -284,6 +319,65 @@ class ModelAdapterHF(ModelAdapter):
             else:
                 raise ValueError(
                     "sparse_meta_data must be provided while calling model.forward()"
+                )
+
+            capture = sparse_meta_data.get("kv_quantization_capture_only")
+            if capture is not None:
+                source_key_length = int(keys.shape[-2])
+                prepared_keys, prepared_values = sparse_attention.quantize_kv(
+                    keys,
+                    values,
+                    sparse_meta_data,
+                    num_new_tokens=int(queries.shape[-2]),
+                    **kwargs,
+                )
+                implementation = capture[id(module)]
+                quantization = sparse_attention.kv_quantization
+                if quantization is not None and quantization.config.quantize_prefill:
+                    keys, values = prepared_keys, prepared_values
+                    target_key_length = int(keys.shape[-2])
+                    # Preserve the native mask format when positions are unchanged:
+                    # FlashAttention can use a 2D padding mask instead of 4D.
+                    if target_key_length != source_key_length:
+                        if implementation not in ("eager", "sdpa"):
+                            raise NotImplementedError(
+                                "Longer reconstructed prefill history requires eager or sdpa"
+                            )
+                        window = kwargs.get("sliding_window")
+                        attention_mask = align_attention_mask(
+                            attention_mask,
+                            source_key_length=source_key_length,
+                            target_key_length=target_key_length,
+                            query_length=int(queries.shape[-2]),
+                            dtype=queries.dtype,
+                            device=queries.device,
+                            sliding_window=window if isinstance(window, int) else None,
+                        )
+                if implementation == "eager":
+                    native_attention = getattr(
+                        import_module(type(module).__module__),
+                        "eager_attention_forward",
+                        None,
+                    )
+                    if native_attention is None:
+                        raise NotImplementedError(
+                            "This model does not expose its native eager prefill callback"
+                        )
+                else:
+                    native_attention = ALL_ATTENTION_FUNCTIONS[implementation]
+                native_attention = cast(
+                    Callable[..., Tuple[torch.Tensor, Optional[torch.Tensor]]],
+                    native_attention,
+                )
+                return native_attention(
+                    module,
+                    queries,
+                    keys,
+                    values,
+                    attention_mask,
+                    scaling=scaling,
+                    dropout=dropout,
+                    **kwargs,
                 )
 
             return sparse_attention.custom_attention(
@@ -369,8 +463,14 @@ class ModelAdapterHF(ModelAdapter):
         self._custom_attention_fn = None
 
     @contextmanager
-    def enable_sparse_mode(self) -> Generator[None, None, None]:
+    def enable_sparse_mode(
+        self, *, native_prefill: bool = False
+    ) -> Generator[None, None, None]:
         """Context manager to temporarily enable sparse attention mode.
+
+        Args:
+            native_prefill: Use the original mask factory while capturing K/V.
+                Native flash/SDPA/eager handlers must receive their native mask format.
 
         Yields:
             None
@@ -393,8 +493,17 @@ class ModelAdapterHF(ModelAdapter):
 
         # Ensure custom attention function is registered (reuse if already registered)
         custom_attention_name: str = self._ensure_attention_registered()
+        original_mask = None
 
         try:
+            if native_prefill:
+                original_mask = ALL_MASK_ATTENTION_FUNCTIONS[custom_attention_name]
+                ALL_MASK_ATTENTION_FUNCTIONS.register(
+                    custom_attention_name,
+                    ALL_MASK_ATTENTION_FUNCTIONS[
+                        self.model.config._attn_implementation
+                    ],
+                )
             # Switch to sparse attention
             for name, module in self.model.named_modules():
                 if hasattr(module, "config") and hasattr(
@@ -409,6 +518,10 @@ class ModelAdapterHF(ModelAdapter):
             for name, module in self.model.named_modules():
                 if name in original_implementations:
                     module.config._attn_implementation = original_implementations[name]
+            if original_mask is not None:
+                ALL_MASK_ATTENTION_FUNCTIONS.register(
+                    custom_attention_name, original_mask
+                )
 
     def _generate_response(
         self,

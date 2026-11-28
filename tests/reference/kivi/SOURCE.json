@@ -1,0 +1,12 @@
+{
+  "repository": "https://github.com/jy-yuan/KIVI",
+  "commit": "876b4d2d08e3b1d5f70d0969c299d8c7c42ddfb6",
+  "files": {
+    "new_pack.py.txt": {
+      "url": "https://github.com/jy-yuan/KIVI/blob/876b4d2d08e3b1d5f70d0969c299d8c7c42ddfb6/quant/new_pack.py",
+      "sha256": "3678af0e34a0ba18e5d80a4128acf11d4070667c800a15540a16d07253a4f75e",
+      "bytes": 8708
+    }
+  },
+  "execution": "Tests extract the six pure-PyTorch pack/unpack functions, adapting list indices to tuple indices for PyTorch 2.9+ compatibility. Arithmetic is unchanged. GPU code is not imported."
+}

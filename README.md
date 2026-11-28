@@ -244,6 +244,11 @@ print(response.responses)  # "Answer: The capital of France is Paris."
 
 ## 📚 Installation
 
+Use **Python 3.10 or newer**. The HF attention/mask registry integration is pinned
+to **Transformers 4.57.1**; older releases do not provide the contract this code
+uses. The reference CPU checks use PyTorch 2.8.0. Compatibility CI covers Python
+3.10 and 3.12; additional Python/Torch versions are not certified by those checks.
+
 ```bash
 # Clone the repository
 git clone https://github.com/xAlg-ai/sparse-attention-hub.git
@@ -262,11 +267,25 @@ pip install -e ".[dev]"
 # Run all tests
 pytest
 
-# Run specific test categories
-pytest -m unit          # Unit tests
-pytest -m integration   # Integration tests
+# Run tests carrying the corresponding category marker
+pytest -m unit
+pytest -m integration
 
 ```
+
+For the quantization implementation, these commands run offline with local tiny
+models and no pretrained-weight or benchmark-dataset downloads:
+
+```bash
+python -m pytest -q -m unit tests/unit/kv_quantization
+python -m pytest -q -m integration tests/integration/test_kv_quantization*.py tests/integration/test_kivi_reference_flow.py
+```
+
+See the [quantization guide](sparse_attention_hub/kv_quantization/README.md) for
+implemented components, diagnostics and current limitations.
+The [method implementation notes](sparse_attention_hub/kv_quantization/implementations/README.md)
+describe KIVI, QuaRot KV and TurboQuant MSE/prod reference behavior and the status
+of other recipes.
 
 
 ## 📖 Documentation

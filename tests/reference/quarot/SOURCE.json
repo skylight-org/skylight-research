@@ -1,0 +1,25 @@
+{
+  "repository": "https://github.com/spcl/QuaRot",
+  "revision": "5008669b08c1f11f9b64d52d16fddd47ca754c5a",
+  "license": "Apache-2.0",
+  "files": {
+    "quant_utils.py.txt": {
+      "upstream_path": "fake_quant/quant_utils.py",
+      "sha256": "de0aa3a7abf0acb6371beadae16cb7dfa5cbdb9db7e3872da41670cfa5dee57e"
+    },
+    "rotation_utils.py.txt": {
+      "upstream_path": "fake_quant/rotation_utils.py",
+      "sha256": "e1d24439367b933d0f0b6c6a9ce82c79a0fcb82f6bd4d43f4086348af32d54f3"
+    },
+    "main.py.txt": {
+      "upstream_path": "fake_quant/main.py",
+      "sha256": "52a9fe3b5c1a90daad1cf4054a02c33367995959dbd2524862832a26b8ba7473"
+    }
+  },
+  "production_adaptations": [
+    "numerics reproduced by IntQuantizer with quarot_int_quantizer() (implementations/quarot_kv.py)",
+    "torch-only imports; local no-op cleanup shim; numerical bodies unchanged",
+    "Skylight configuration, validation, compact parameters and bitstream storage"
+  ],
+  "fast_hadamard_revision": "4ea722e434e3d4f2a14522341959ebdbe62be2de"
+}

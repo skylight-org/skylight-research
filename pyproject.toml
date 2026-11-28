@@ -11,7 +11,7 @@ authors = [
 ]
 readme = "README.md"
 license = {text = "MIT"}
-requires-python = ">=3.9"
+requires-python = ">=3.10"
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
@@ -19,10 +19,9 @@ classifiers = [
     "License :: OSI Approved :: MIT License",
     "Operating System :: OS Independent",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.8",
-    "Programming Language :: Python :: 3.9",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
     "Topic :: Software Development :: Libraries :: Python Modules",
 ]
@@ -34,7 +33,8 @@ dependencies = [
     "matplotlib>=3.5.0",
     "seaborn>=0.11.0",
     "datasets>=2.0.0",
-    "transformers>=4.20.0",
+    # Attention and mask registry integration is verified against this release.
+    "transformers==4.57.1",
     "scikit-learn>=1.0.0",
     "rouge>=1.0.0",
     "nltk>=3.8.0",
@@ -107,6 +107,9 @@ where = ["."]
 include = ["sparse_attention_hub*"]
 exclude = ["tests*"]
 
+[tool.setuptools.package-data]
+"sparse_attention_hub.kv_quantization" = ["LICENSE-KITTY", "LICENSE-KIVI", "LICENSE-QUAROT"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 python_files = ["test_*.py"]
@@ -127,7 +130,7 @@ markers = [
 
 [tool.black]
 line-length = 88
-target-version = ["py38", "py39", "py310", "py311"]
+target-version = ["py310", "py311"]
 include = '\.pyi?$'
 extend-exclude = '''
 /(

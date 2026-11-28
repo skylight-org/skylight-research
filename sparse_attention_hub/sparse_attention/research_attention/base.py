@@ -109,7 +109,7 @@ class ResearchAttention(SparseAttention):
         attention_mask: Optional[torch.Tensor],
         scaling: float,
         dropout: float,
-        **kwargs: Dict[str, Any],
+        **kwargs: Any,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
         """Compute research attention mechanism with masking.
 
@@ -132,6 +132,41 @@ class ResearchAttention(SparseAttention):
                 "sparse_meta_data must be provided in kwargs while calling custom_attention()"
             )
         sparse_meta_data: Dict[Any, Any] = kwargs.pop("sparse_meta_data")
+
+        # KV quantization runs on every layer, independently of the gating below.
+        source_key_length = int(keys.shape[-2])
+        if self.kv_quantization is not None:
+            from ...kv_quantization.attention_mask import align_attention_mask
+            from ...kv_quantization.cache.store import CACHE_KEY
+
+            store = sparse_meta_data.get(CACHE_KEY)
+            layer_idx = kwargs["layer_idx"]
+            window = kwargs.get("sliding_window")
+            # A late first callback cannot recover a prefix already evicted by HF.
+            # The adapter captures prefill; direct callers must do the same.
+            if (
+                isinstance(window, int)
+                and source_key_length > queries.shape[-2]
+                and (store is None or layer_idx not in store.layers)
+            ):
+                raise ValueError("Capture prefill before quantizing a sliding HF cache")
+        keys, values = self.quantize_kv(
+            keys,
+            values,
+            sparse_meta_data,
+            num_new_tokens=int(queries.shape[-2]),
+            **kwargs,
+        )
+        if self.kv_quantization is not None:
+            attention_mask = align_attention_mask(
+                attention_mask,
+                source_key_length=source_key_length,
+                target_key_length=int(keys.shape[-2]),
+                query_length=int(queries.shape[-2]),
+                dtype=queries.dtype,
+                device=queries.device,
+                sliding_window=window if isinstance(window, int) else None,
+            )
 
         # Layer-type gating: run exact dense attention on excluded layers and emit no
         # micro-metrics for them. The mask HuggingFace passed in is already the correct
